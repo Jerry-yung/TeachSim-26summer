@@ -23,12 +23,12 @@
 | A | 前端与音视频交互 | `frontend/` |
 | B | AI 算法与知识库 | `ai/` |
 | C | 后端架构与数据统筹 | `backend/` |
-
+| D | 文档撰写和维护 | `docs/` |
 ---
 
 ## 快速开始
 
-克隆仓库后，参考 [开发指南](docs/dev-guide.md) 启动本地环境。
+克隆仓库后，参考 [开发指南](docs/dev-guide.md) 启动本地环境.
 
 ```bash
 git clone https://github.com/Weirdo0411/TeachSim
