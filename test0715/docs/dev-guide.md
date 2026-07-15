@@ -8,7 +8,7 @@
 ```
 TeachSim/
 ├── frontend/          ← 刘至晗 负责（Vue3 + Vite）
-├── backend/           ← 王宏伟 负责（FastAPI + PostgreSQL）
+├── backend/           ← 唐一嘉 负责（FastAPI + PostgreSQL）
 ├── ai/                ← 杨云天 负责（LangChain + Prompt）
 └── docs/              ← 三人共同维护
     ├── api.md         ← 接口契约（改动需通知所有人）
@@ -48,5 +48,3 @@ pip install -r requirements.txt
 # 配置 .env 文件中的 API Key
 python main.py
 ```
-
-
