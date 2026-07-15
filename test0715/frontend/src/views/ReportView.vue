@@ -184,30 +184,32 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, computed } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, reactive, onMounted, onUnmounted, computed, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import * as echarts from 'echarts'
-import { mockReport as report } from '@/mock/reportData.js'
+import { mockReport } from '@/mock/reportData.js'
+import { fetchReport } from '@/api/ai.js'
 
 const router = useRouter()
+const route = useRoute()
 const radarContainer = ref(null)
+const report = reactive(JSON.parse(JSON.stringify(mockReport)))
 let radarChart = null
 
-const maxFillerCount = computed(() => Math.max(...report.hard_stats.filler_words.map((f) => f.count)))
-const totalQuestions = computed(() => report.question_types.reduce((s, q) => s + q.count, 0))
+const maxFillerCount = computed(() => Math.max(...report.hard_stats.filler_words.map((f) => f.count), 1))
+const totalQuestions = computed(() => Math.max(report.question_types.reduce((s, q) => s + q.count, 0), 1))
 
 const formattedSuggestions = computed(() =>
-  report.improvement_suggestions
+  (report.improvement_suggestions || '')
     .replace(/\n\n/g, '<br><br>')
     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-    .replace(/①|②|③/g, (m) => `<span class="list-marker">${m}</span>`)
+    .replace(/①|②|③/g, (m) => `<span class="list-marker">${m}</span>`),
 )
 
 const formattedHistory = computed(() =>
-  report.history_comparison.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+  (report.history_comparison || '').replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>'),
 )
 
-// 将定性等级映射为 ECharts tooltip 显示文本
 function levelLabel(val) {
   if (val >= 85) return '优秀'
   if (val >= 70) return '良好'
@@ -215,11 +217,8 @@ function levelLabel(val) {
   return '需关注'
 }
 
-onMounted(() => {
-  if (!radarContainer.value) return
-
-  radarChart = echarts.init(radarContainer.value)
-
+function updateChart() {
+  if (!radarChart) return
   radarChart.setOption({
     backgroundColor: 'transparent',
     radar: {
@@ -267,7 +266,6 @@ onMounted(() => {
         ],
       },
     ],
-    // Tooltip 只显示定性等级，不显示数字
     tooltip: {
       trigger: 'item',
       formatter: () => {
@@ -277,11 +275,39 @@ onMounted(() => {
       },
     },
   })
+}
+
+async function loadReport() {
+  const sessionId = String(route.params.sessionId || '')
+  if (!sessionId || sessionId === 'mock-session-001') {
+    updateChart()
+    return
+  }
+  try {
+    const data = await fetchReport(sessionId)
+    Object.assign(report, data)
+  } catch (err) {
+    console.warn('[Report] 获取真实报告失败，回退到 mock：', err.message)
+  } finally {
+    updateChart()
+  }
+}
+
+watch(
+  () => report.dimensions.map((item) => item._val).join(','),
+  () => updateChart(),
+)
+
+onMounted(async () => {
+  if (!radarContainer.value) return
+
+  radarChart = echarts.init(radarContainer.value)
+  updateChart()
+  await loadReport()
 
   const handleResize = () => radarChart?.resize()
   window.addEventListener('resize', handleResize)
 
-  // 正确的清理方式：移出 onMounted 回调
   onUnmounted(() => {
     window.removeEventListener('resize', handleResize)
     radarChart?.dispose()

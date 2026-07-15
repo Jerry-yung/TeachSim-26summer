@@ -40,8 +40,9 @@
               <span class="summary-val">{{ formatAnswer(val) }}</span>
             </div>
           </div>
-          <button class="enter-btn" @click="enterClassroom">
-            进入课堂
+          <p v-if="enterError" class="enter-error">{{ enterError }}</p>
+          <button class="enter-btn" :disabled="entering" @click="enterClassroom">
+            {{ entering ? '课堂初始化中…' : '进入课堂' }}
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
               <line x1="5" y1="12" x2="19" y2="12" stroke-linecap="round"/>
               <polyline points="12 5 19 12 12 19" stroke-linecap="round" stroke-linejoin="round"/>
@@ -71,6 +72,9 @@
           <p v-if="store.currentQuestion.hint" class="question-hint-text">
             💡 {{ store.currentQuestion.hint }}
           </p>
+          <p v-if="isMultiSelect" class="question-hint-text multi-hint">
+            ✅ 本题支持多选，可点击多个选项后再确认
+          </p>
 
           <!-- Options -->
           <div class="options-list">
@@ -78,7 +82,7 @@
               v-for="(opt, idx) in store.currentQuestion.options"
               :key="opt"
               class="option-btn"
-              :class="{ selected: selectedValue === opt }"
+              :class="{ selected: isOptionSelected(opt) }"
               @click="selectOption(opt)"
             >
               <span class="option-letter">{{ String.fromCharCode(65 + idx) }}</span>
@@ -114,6 +118,17 @@
                 <polyline points="9 18 15 12 9 6" stroke-linecap="round" stroke-linejoin="round"/>
               </svg>
             </button>
+            <button
+              v-if="isMultiSelect"
+              class="nav-btn confirm"
+              :disabled="!canConfirmMulti"
+              @click="confirmMultiSelect"
+            >
+              确认并下一题
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="9 18 15 12 9 6" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
           </div>
         </div>
       </Transition>
@@ -130,7 +145,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useLessonStore } from '@/stores/lessonStore.js'
 
@@ -139,12 +154,24 @@ const router = useRouter()
 const route = useRoute()
 
 const selectedValue = ref(null)
+const selectedValues = ref([])
+const entering = ref(false)
+const enterError = ref('')
 
 const transitionName = computed(() =>
   store.interviewDirection === 'forward' ? 'slide-forward' : 'slide-back'
 )
 
 function selectOption(opt) {
+  if (isMultiSelect.value) {
+    if (selectedValues.value.includes(opt)) {
+      selectedValues.value = selectedValues.value.filter((v) => v !== opt)
+    } else {
+      selectedValues.value = [...selectedValues.value, opt]
+    }
+    return
+  }
+
   selectedValue.value = opt
   // Brief visual feedback before advancing
   setTimeout(() => {
@@ -153,9 +180,47 @@ function selectOption(opt) {
   }, 260)
 }
 
-function enterClassroom() {
-  const sessionId = route.params.sessionId
-  router.push(`/classroom/${sessionId}`)
+function isOptionSelected(opt) {
+  return isMultiSelect.value ? selectedValues.value.includes(opt) : selectedValue.value === opt
+}
+
+const isMultiSelect = computed(() => !!store.currentQuestion?.allow_multiple)
+const canConfirmMulti = computed(() => selectedValues.value.length > 0)
+
+function confirmMultiSelect() {
+  if (!isMultiSelect.value || !canConfirmMulti.value) return
+  store.answerAndNext(store.currentQuestion.id, [...selectedValues.value])
+  selectedValues.value = []
+}
+
+watch(
+  () => store.currentQuestion?.id,
+  (id) => {
+    selectedValue.value = null
+    selectedValues.value = []
+    if (!id) return
+    const existing = store.interviewAnswers[id]
+    if (Array.isArray(existing)) {
+      selectedValues.value = [...existing]
+    } else if (existing) {
+      selectedValue.value = existing
+    }
+  },
+  { immediate: true },
+)
+
+async function enterClassroom() {
+  if (entering.value) return
+  enterError.value = ''
+  entering.value = true
+  try {
+    const res = await store.bootstrapClassroomSession(String(route.params.sessionId || ''))
+    router.push(`/classroom/${res.session_id}`)
+  } catch (err) {
+    enterError.value = err?.message || '课堂初始化失败'
+  } finally {
+    entering.value = false
+  }
 }
 
 const answeredSummary = computed(() => store.interviewAnswers)
@@ -314,6 +379,11 @@ function formatAnswer(val) {
   line-height: 1.5;
 }
 
+.multi-hint {
+  background: rgba(34, 197, 94, 0.1);
+  color: #15803d;
+}
+
 .options-list {
   display: flex;
   flex-direction: column;
@@ -434,6 +504,21 @@ function formatAnswer(val) {
   background: var(--color-bg);
 }
 
+.nav-btn.confirm {
+  color: #2563eb;
+  background: rgba(37, 99, 235, 0.1);
+  margin-left: 8px;
+}
+
+.nav-btn.confirm:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.nav-btn.confirm:not(:disabled):hover {
+  background: rgba(37, 99, 235, 0.18);
+}
+
 /* ── Context hint bar ────────────────────────────────────────────────── */
 .context-hint-bar {
   display: flex;
@@ -529,9 +614,20 @@ function formatAnswer(val) {
   letter-spacing: -0.2px;
 }
 
-.enter-btn:hover {
+.enter-btn:hover:not(:disabled) {
   opacity: 0.88;
   transform: translateY(-1px);
+}
+
+.enter-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.enter-error {
+  margin-bottom: 12px;
+  color: #dc2626;
+  font-size: 12.5px;
 }
 
 /* ── Slide transitions ───────────────────────────────────────────────── */

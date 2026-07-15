@@ -1,12 +1,17 @@
 <template>
   <div class="app-shell">
-    <AppSidebar />
-    <div class="app-right">
-      <AppTopbar v-if="!isInterviewRoute" />
-      <main class="app-main">
-        <router-view />
-      </main>
-    </div>
+    <template v-if="!isLoginRoute">
+      <AppSidebar />
+      <div class="app-right">
+        <AppTopbar v-if="!isInterviewRoute" />
+        <main class="app-main">
+          <router-view />
+        </main>
+      </div>
+    </template>
+    <template v-else>
+      <router-view />
+    </template>
   </div>
 </template>
 
@@ -17,6 +22,7 @@ import AppSidebar from '@/components/AppSidebar.vue'
 import AppTopbar from '@/components/AppTopbar.vue'
 
 const route = useRoute()
+const isLoginRoute = computed(() => route.path === '/login')
 const isInterviewRoute = computed(() => route.path.startsWith('/interview'))
 </script>
 

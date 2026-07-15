@@ -70,26 +70,34 @@
 
     <!-- User info -->
     <div class="sidebar-footer">
-      <div class="user-avatar">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
-          <circle cx="12" cy="7" r="4"/>
-        </svg>
-      </div>
+      <div class="user-avatar">{{ auth.avatarChar }}</div>
       <div class="user-info">
-        <span class="user-name">刘至晗</span>
-        <span class="user-role">前端开发者</span>
+        <span class="user-name">{{ auth.user?.name }}</span>
+        <span class="user-role">{{ auth.user?.role }}</span>
       </div>
-      <div class="user-dots">
-        <span></span><span></span><span></span>
-      </div>
+      <button class="logout-btn" title="退出登录" @click="doLogout">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+          <polyline points="16 17 21 12 16 7"/>
+          <line x1="21" y1="12" x2="9" y2="12"/>
+        </svg>
+      </button>
     </div>
   </aside>
 </template>
 
 <script setup>
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
+import { useAuthStore } from '@/stores/authStore.js'
+
 const route = useRoute()
+const router = useRouter()
+const auth = useAuthStore()
+
+function doLogout() {
+  auth.logout()
+  router.push('/login')
+}
 </script>
 
 <style scoped>
@@ -219,12 +227,14 @@ const route = useRoute()
 .user-avatar {
   width: 32px;
   height: 32px;
-  background: #E8ECF0;
+  background: linear-gradient(135deg, #2563EB, #7C3AED);
   border-radius: var(--radius-full);
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--color-text-secondary);
+  color: white;
+  font-size: 13px;
+  font-weight: 700;
   flex-shrink: 0;
 }
 
@@ -247,17 +257,21 @@ const route = useRoute()
   color: var(--color-text-muted);
 }
 
-.user-dots {
+.logout-btn {
+  width: 28px;
+  height: 28px;
   display: flex;
-  gap: 3px;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
   cursor: pointer;
-  padding: 4px;
+  transition: all 0.15s;
+  flex-shrink: 0;
 }
 
-.user-dots span {
-  width: 3px;
-  height: 3px;
-  border-radius: 50%;
-  background: var(--color-text-muted);
+.logout-btn:hover {
+  background: #FEE2E2;
+  color: #DC2626;
 }
 </style>

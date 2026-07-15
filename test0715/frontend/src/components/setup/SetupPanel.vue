@@ -61,37 +61,16 @@
     </button>
 
     <p v-if="store.isAnalyzing" class="start-hint analyzing">AI 正在解读文件，请稍候…</p>
-    <p v-else-if="store.hasPPT" class="start-hint ready-hint">✓ PPT 已就绪，课堂时将在下半屏演示</p>
-    <p v-else-if="store.uploadedFile" class="start-hint ready-hint">✓ 教案已就绪，将纳入评价维度</p>
+    <p v-else-if="store.hasAnyFile" class="start-hint ready-hint">✓ 文件已就绪，点击进入课堂配置</p>
+    <p v-else class="start-hint">无需上传，也可直接开始</p>
   </div>
 </template>
 
 <script setup>
-import { computed } from 'vue'
 import { useLessonStore } from '@/stores/lessonStore.js'
 
 const store = useLessonStore()
 defineEmits(['start'])
-
-const fileStatusIcon = computed(() => {
-  if (store.isAnalyzing) return '⏳'
-  if (store.hasPPT) return '🖼️'
-  if (store.uploadedFile) return '📄'
-  return '💡'
-})
-
-const fileStatusText = computed(() => {
-  if (store.isAnalyzing) return 'AI 正在分析文件内容…'
-  if (store.hasPPT) return '已上传 PPT，模拟课堂时将在屏幕下半部展示'
-  if (store.uploadedFile) return '已上传教案，将纳入本次评价维度'
-  return '未上传文件，也可直接开始——采用通用评价方式'
-})
-
-const fileStatusCls = computed(() => {
-  if (store.isAnalyzing) return 'status-analyzing'
-  if (store.uploadedFile) return 'status-ready'
-  return 'status-empty'
-})
 </script>
 
 <style scoped>

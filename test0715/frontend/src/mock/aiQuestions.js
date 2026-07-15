@@ -62,6 +62,7 @@ export const DEFAULT_INTERVIEW_QUESTIONS = [
     type: 'radio',
     label: '本节课您希望学生主要达成哪类目标？',
     emoji: '🎯',
+    allow_multiple: true,
     required: false,
     skippable: true,
     options: [
@@ -77,6 +78,7 @@ export const DEFAULT_INTERVIEW_QUESTIONS = [
     label: '本次课您最想在哪个方面有所突破？',
     hint: '课后报告将对此进行重点定向分析',
     emoji: '💡',
+    allow_multiple: true,
     required: false,
     skippable: true,
     options: [
