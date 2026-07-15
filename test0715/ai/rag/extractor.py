@@ -38,18 +38,6 @@ EXTRACTION_PROMPT = """你是一位资深教育专家，擅长深度分析教学
       "tags": ["标签1", "标签2"],
       "prerequisite": "前置知识"
     }}
-  ],
-  "preset_questions": [
-    {{
-      "id": "q1",
-      "question": "学生可能提出的问题（口语化）",
-      "type": "问题类型：质疑型/困惑型/拓展型/应用型/细节型",
-      "difficulty": "难度：低/中/高",
-      "trigger_timing": "触发时机（对应哪个知识点或环节）",
-      "related_kp": "关联的知识点id",
-      "expected_answer": "期望的老师回答要点",
-      "possible_followup": "学生可能的追问"
-    }}
   ]
 }}
 
@@ -62,9 +50,7 @@ EXTRACTION_PROMPT = """你是一位资深教育专家，擅长深度分析教学
 1. basic_info: 从教案标题、标注信息中提取，如未明确则合理推测
 2. teaching_objectives: 分别提取知识、能力、情感三维目标
 3. knowledge_points: 提取4-8个核心知识点，包含id、难度、分类、描述、标签、前置知识
-4. preset_questions: 生成5-8个学生可能提出的问题，要贴近真实课堂场景，包含追问
-
-所有内容要具体、实用，preset_questions要体现不同学生的思维特点。
+4. 不要生成 preset_questions 字段
 
 只返回JSON，不要其他文字。
 """
@@ -79,7 +65,7 @@ class LessonExtractor:
         self.chain = self.prompt | self.llm
     
     def extract(self, content: str) -> Dict[str, Any]:
-        """从教案文本中提取知识点和预设问题"""
+        """从教案文本中提取结构化教学信息。"""
         # 截断过长的内容
         max_length = 12000
         if len(content) > max_length:
@@ -122,6 +108,9 @@ class LessonExtractor:
     
     def _validate_result(self, result: Dict) -> Dict:
         """验证并补充默认值"""
+        # v2 约定：不再返回 preset_questions
+        result.pop("preset_questions", None)
+
         defaults = {
             "basic_info": {
                 "lesson_topic": "未识别课题",
@@ -142,18 +131,6 @@ class LessonExtractor:
                     "description": "本节课的核心教学内容",
                     "tags": ["核心"],
                     "prerequisite": "基础知识"
-                }
-            ],
-            "preset_questions": [
-                {
-                    "id": "q1",
-                    "question": "老师，这部分内容我没听懂",
-                    "type": "困惑型",
-                    "difficulty": "中",
-                    "trigger_timing": "讲解过程中",
-                    "related_kp": "kp1",
-                    "expected_answer": "需要进一步解释",
-                    "possible_followup": "能再举个例子吗？"
                 }
             ]
         }
@@ -189,18 +166,6 @@ class LessonExtractor:
                     "description": "本节课的核心教学内容",
                     "tags": ["核心"],
                     "prerequisite": "基础知识"
-                }
-            ],
-            "preset_questions": [
-                {
-                    "id": "q1",
-                    "question": "老师，这个概念我不太理解",
-                    "type": "困惑型",
-                    "difficulty": "中",
-                    "trigger_timing": "讲解过程中",
-                    "related_kp": "kp1",
-                    "expected_answer": "需要进一步解释说明",
-                    "possible_followup": "可以举个例子吗？"
                 }
             ],
             "_extraction_error": error_msg

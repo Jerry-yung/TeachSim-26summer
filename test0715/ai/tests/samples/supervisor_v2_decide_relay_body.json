@@ -1,0 +1,42 @@
+{
+  "teacher_text": "小明，你来补充一下刚才小红的回答。",
+  "current_timestamp": "2026-04-16T08:07:15+08:00",
+  "subject": "初中数学",
+  "chat_history": [
+    {
+      "role": "teacher",
+      "content": "同学们看第二页，先明确勾股定理只适用于直角三角形。"
+    },
+    {
+      "role": "teacher",
+      "content": "谁能解释一下为什么勾股定理不能用于任意三角形？"
+    },
+    {
+      "role": "teacher",
+      "content": "小红，你来回答一下。"
+    },
+    {
+      "role": "student",
+      "content": "因为勾股定理需要直角三角形。"
+    },
+    {
+      "role": "teacher",
+      "content": "小明，你来补充一下刚才小红的回答。"
+    }
+  ],
+  "current_ppt": [
+    {
+      "slide_no": 2,
+      "title": "勾股定理与前提",
+      "text_blocks": ["勾股定理仅适用于直角三角形", "a²+b²=c²"],
+      "visual_elements": ["直角三角形示意图"],
+      "summary": "定义与适用条件"
+    }
+  ],
+  "called_student_status_digest":
+  {
+    "student_id":"student_xm",
+    "student_type":"xueyou",
+    "is_hand_raised": true
+  }
+}

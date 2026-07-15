@@ -1,0 +1,25 @@
+{
+  "teacher_text": "同学们把定义先记下来，接下来我们做两道基础题。",
+  "current_timestamp": "2026-04-16T08:05:40+08:00",
+  "subject": "初中数学",
+  "chat_history": [
+    {
+      "role": "teacher",
+      "content": "我们先看定义：在直角三角形中，两直角边的平方和等于斜边的平方。"
+    },
+    {
+      "role": "teacher",
+      "content": "同学们把定义先记下来，接下来我们做两道基础题。"
+    }
+  ],
+  "current_ppt": [
+    {
+      "slide_no": 2,
+      "title": "勾股定理",
+      "text_blocks": ["在直角三角形中", "a²+b²=c²"],
+      "visual_elements": ["公式与图形"],
+      "summary": "文字表述与符号"
+    }
+  ],
+  "called_student_status_digest": null
+}

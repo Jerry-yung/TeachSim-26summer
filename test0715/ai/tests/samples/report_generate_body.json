@@ -1,0 +1,138 @@
+{
+  "lesson_json": {
+    "teaching_preferences": {
+      "grade": "八年级",
+      "class_type": "普通班",
+      "primary_goal": "技能掌握与方法运用",
+      "breakthrough_focus": "提问质量与互动引导"
+    },
+    "basic_info": {
+      "lesson_topic": "勾股定理",
+      "subject": "初中数学",
+      "lesson_type": "新授课",
+      "grade": "八年级",
+      "duration_minutes": 45,
+      "textbook_version": "人教版八年级下册"
+    },
+    "teaching_objectives": {
+      "knowledge": "理解勾股定理的文字表述与符号形式；能在直角三角形情境中正确选用 a²+b²=c² 求未知边长；明确定理仅适用于直角三角形。",
+      "ability": "能通过画图、测量与简单推理验证结论；能将实际问题抽象为直角三角形模型并完成计算与检验。",
+      "emotion": "体会数形结合与数学严谨性，增强用数学语言有条理表达的习惯。"
+    },
+    "knowledge_points": [
+      {
+        "id": "kp1",
+        "point": "勾股定理的文字与符号表述",
+        "difficulty": "中",
+        "category": "概念",
+        "description": "在直角三角形中，两直角边的平方和等于斜边的平方。",
+        "tags": ["核心", "定义"],
+        "prerequisite": "平方根与直角三角形边角关系"
+      },
+      {
+        "id": "kp2",
+        "point": "定理的适用前提",
+        "difficulty": "中",
+        "category": "概念",
+        "description": "必须存在直角；非直角三角形不能直接使用勾股定理。",
+        "tags": ["易错点"],
+        "prerequisite": "kp1"
+      },
+      {
+        "id": "kp3",
+        "point": "已知两边求第三边",
+        "difficulty": "中",
+        "category": "技能",
+        "description": "区分直角边与斜边，必要时先判断哪条为斜边再代入。",
+        "tags": ["计算", "建模"],
+        "prerequisite": "kp1"
+      },
+      {
+        "id": "kp4",
+        "point": "简单实际问题应用",
+        "difficulty": "中高",
+        "category": "应用",
+        "description": "将梯子、距离等问题抽象为直角三角形并检验答案合理性。",
+        "tags": ["应用"],
+        "prerequisite": "kp3"
+      }
+    ],
+    "_file_info": {
+      "filename": ["勾股定理_教案.md"],
+      "size": 8192
+    }
+  },
+  "segment_evals": [
+    {
+      "segment_id": "seg-001",
+      "start_ts": "2026-04-16T08:05:10+08:00",
+      "end_ts": "2026-04-16T08:08:42+08:00",
+      "slide_no": 2,
+      "scores": {
+        "instructional_clarity": 86,
+        "student_engagement": 68,
+        "pace_control": 82
+      },
+      "strengths": [
+        "从生活情境引入，明确本页学习目标与「直角」关键词",
+        "板书与 PPT 公式对应清晰，强调 a、b、c 的几何含义",
+        "用反例口头追问「任意三角形能否套用」，有助于澄清前提"
+      ],
+      "issues": [
+        "学生主动举手与齐答比例偏高，个别学情暴露不足",
+        "对「斜边未标明」的图形变式停留略短"
+      ],
+      "improvement_actions": [
+        "增加一次同桌互说「定理条件」再全班抽查",
+        "呈现一道「需先判断直角」的变式题并给 1～2 分钟独立思考"
+      ]
+    },
+    {
+      "segment_id": "seg-002",
+      "start_ts": "2026-04-16T08:09:10+08:00",
+      "end_ts": "2026-04-16T08:12:30+08:00",
+      "slide_no": 3,
+      "scores": {
+        "instructional_clarity": 83,
+        "student_engagement": 76,
+        "pace_control": 79
+      },
+      "strengths": [
+        "例题梯度合理：从已知两直角边到已知一直角边与斜边",
+        "强调「先画图标边、再代入」的解题规范",
+        "课堂小结回扣本页核心句式，利于形成结构化笔记"
+      ],
+      "issues": [
+        "学生板演时纠错以教师为主，同伴互评较少",
+        "课堂节奏略紧，部分学生验算环节被压缩"
+      ],
+      "improvement_actions": [
+        "板演后增加「同伴找错—说理由」环节",
+        "验算与单位书写列入评分要点，留半分钟自检"
+      ]
+    },
+    {
+      "segment_id": "seg-003",
+      "start_ts": "2026-04-16T08:13:00+08:00",
+      "end_ts": "2026-04-16T08:16:20+08:00",
+      "slide_no": 4,
+      "scores": {
+        "instructional_clarity": 80,
+        "student_engagement": 74,
+        "pace_control": 77
+      },
+      "strengths": [
+        "综合应用题贴近校园测量情境，激发兴趣",
+        "引导学生用「是否合理」做答案检验"
+      ],
+      "issues": [
+        "建模时对「哪条边为斜边」的追问不够充分",
+        "学困生在文字题向图形转化上仍需更多支架"
+      ],
+      "improvement_actions": [
+        "提供解题脚手架：读题—标已知—画草图—列式—检验",
+        "分层布置基础题与拓展题，课末快速统计完成度"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "teacher_text": "这个地方你们应该都懂了吧，不懂也先往下听。",
+  "current_timestamp": "2026-04-16T08:09:45+08:00",
+  "subject": "初中数学",
+  "chat_history": [
+    {
+      "role": "teacher",
+      "content": "我们直接套用公式。"
+    },
+    {
+      "role": "teacher",
+      "content": "这个地方你们应该都懂了吧，不懂也先往下听。"
+    }
+  ],
+  "current_ppt": [
+    {
+      "slide_no": 3,
+      "title": "例题2：求斜边长",
+      "text_blocks": ["已知两直角边", "求斜边"],
+      "visual_elements": ["例题配图"],
+      "summary": "套用公式求第三边"
+    }
+  ],
+  "called_student_status_digest": null
+}

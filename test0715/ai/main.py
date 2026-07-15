@@ -12,20 +12,25 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 
 # 确保能导入本地模块
 sys.path.insert(0, str(Path(__file__).parent))
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 # 导入模块
 from rag import LessonExtractor
 from rag.parser import DocumentParser
-from supervisor import Supervisor
-from agents import StudentAgent
+from agents import (
+    PreclassPptLLM,
+    InclassSegmentEvalLLM,
+    InclassSupervisorAgent,
+    InclassStudentAgent,
+    PostclassReportLLM,
+)
 
 # ============ 配置 ============
 
@@ -83,19 +88,20 @@ app.add_middleware(
 
 # 初始化组件
 extractor = LessonExtractor()
-supervisor = Supervisor()
-student_agent = StudentAgent()
+student_agent = InclassStudentAgent()
+preclass_ppt_llm = PreclassPptLLM()
+segment_eval_llm = InclassSegmentEvalLLM()
+inclass_supervisor_v2 = InclassSupervisorAgent()
+postclass_report_llm = PostclassReportLLM()
 
 
 # ============ 数据模型 ============
 
-class SupervisorRequest(BaseModel):
-    """主控决策请求"""
-    teacher_text: str
-    lesson_topic: Optional[str] = "未指定"
-    subject: Optional[str] = "未指定"
-    current_topic: Optional[str] = ""
-    session_id: Optional[str] = None
+
+class ChatMessage(BaseModel):
+    """对话历史消息"""
+    role: str  # "teacher" | "student" | "system" 等
+    content: str
 
 
 class AgentRequest(BaseModel):
@@ -103,6 +109,32 @@ class AgentRequest(BaseModel):
     agent_type: str  # gangjing, xuekun, sleepy, whisper
     context: str
     subject: Optional[str] = "数学"
+    chat_history: Optional[List[ChatMessage]] = None  # 可选：提供对话上下文
+
+
+class SupervisorV2Request(BaseModel):
+    """v2 主控：师生交互请求体；dialog_state 由 Supervisor 内部推断并随响应返回。
+
+    字段说明：
+    - teacher_text: 教师本轮发言内容（必填）
+    - current_timestamp: 当前时间戳（ISO8601，可选但建议必传）
+    - subject: 学科（如"初中数学"，可选）
+    - chat_history: 对话历史（可选），包含教师和学生发言
+    - current_ppt: 当前 PPT 页内容（可选），结构与 PPT 结构化输出的 slides[] 单条一致
+    - called_student_status_digest: 被点名学生状态摘要（可选）；JSON null 表示无（空），与「提问类」
+      组合为 questioning；非 null 时为 relay_answer（与 questioning 语义依据相同，仅由此字段区分）
+    """
+    teacher_text: str
+    current_timestamp: Optional[str] = None  # ISO8601，表示当前时刻
+    subject: Optional[str] = None  # 学科
+    chat_history: Optional[List[ChatMessage]] = None  # 对话历史
+    current_ppt: Optional[List[Dict[str, Any]]] = None  # 当前 PPT 页（仅一条）
+    called_student_status_digest: Optional[Any] = None  # null → questioning；非 null → relay_answer
+
+
+class ReportGenerateRequest(BaseModel):
+    lesson_json: Dict[str, Any]
+    segment_evals: List[Dict[str, Any]]
 
 
 # ============ 健康检查 ============
@@ -275,7 +307,6 @@ async def test_rag(
         "basic_info": {...},
         "teaching_objectives": {...},
         "knowledge_points": [...],
-        "preset_questions": [...],
         "_file_info": {
             "filename": ["file1.pdf", "file2.docx"],  // 列表格式
             "size": 12345
@@ -298,64 +329,128 @@ async def test_rag(
     return await parse_lesson(file)
 
 
-# ============ Supervisor 模块接口 ============
+# ============ v2 联调接口（与 `测试.md` 中 curl 一致） ============
 
-@app.post("/ai/supervisor/decide")
-def supervisor_decide(request: SupervisorRequest):
-    """
-    主控决策：根据教师发言决定下一步动作
-    
-    返回格式（符合 api.md 4.1）：
-    {
-        "session_id": "uuid-xxxx",
-        "timestamp_ms": 5200,
-        "evaluation_note": "教态良好，准确讲出勾股定理定义",
-        "is_questioning": false,
-        "error_detected": false,
-        "trigger_agent": "gangjing",
-        "agent_prompt": "老师刚讲完勾股定理，请用初二学生口吻质疑：如果不是直角三角形还成立吗？"
-    }
-    """
+
+@app.post("/ai/v2/preclass/lesson/parse")
+async def v2_preclass_lesson_parse(
+    file: UploadFile = File(...),
+    grade: Optional[str] = Form(""),
+    subject: Optional[str] = Form(""),
+):
+    """教案上传解析，等价于 `/ai/parse_lesson`，供联调手册固定路径使用。"""
     try:
-        result = supervisor.decide(
-            teacher_text=request.teacher_text,
-            lesson_topic=request.lesson_topic,
-            subject=request.subject,
-            current_topic=request.current_topic,
-            session_id=request.session_id
+        return await _parse_single_file(file, grade, subject)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=make_error_response("AI_UNSUPPORTED_FORMAT", str(e)),
         )
-        return result
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=make_error_response("AI_DECISION_ERROR", str(e))
+            detail=make_error_response("AI_PARSE_ERROR", str(e)),
         )
 
 
-class TeacherTextRequest(BaseModel):
-    teacher_text: str
-
-@app.post("/test/supervisor")
-def test_supervisor(request: TeacherTextRequest):
-    """
-    测试 Supervisor 功能（简化版）
-    
-    用法：
-        curl -X POST http://localhost:8001/test/supervisor \
-          -H "Content-Type: application/json" \
-          -d '{"teacher_text": "同学们好，今天讲勾股定理"}'
-    """
+@app.post("/ai/v2/preclass/ppt/parse")
+async def v2_preclass_ppt_parse(file: UploadFile = File(...)):
+    """上传 pptx，返回 deck_info + slides（每页内容）。"""
     try:
-        result = supervisor.decide(
-            teacher_text=request.teacher_text,
-            lesson_topic="勾股定理",
-            subject="初中数学"
+        content = await file.read()
+        slides_text = DocumentParser.parse_pptx_slides(content)
+        name = file.filename or "upload.pptx"
+        return preclass_ppt_llm.run(filename=name, slides_text=slides_text)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=make_error_response("AI_UNSUPPORTED_FORMAT", str(e)),
         )
-        return result
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=make_error_response("AI_DECISION_ERROR", str(e))
+            detail=make_error_response("AI_PARSE_ERROR", str(e)),
+        )
+
+
+@app.post("/ai/v2/inclass/segment/eval")
+def v2_inclass_segment_eval(body: Dict[str, Any] = Body(...)):
+    """段落评价（LLM2）。"""
+    try:
+        return segment_eval_llm.run(body)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=make_error_response("AI_LLM_ERROR", str(e)),
+        )
+
+
+@app.post("/ai/v2/inclass/supervisor/decide")
+def v2_inclass_supervisor_decide(req: SupervisorV2Request):
+    """主控 + 直连 student agent（v2）。
+
+    支持两种调用方式：
+    1. 新格式：teacher_text + current_timestamp + subject + chat_history + current_ppt
+       + called_student_status_digest
+    2. 旧格式兼容：通过 background 字段（已废弃，向后兼容）
+    """
+    try:
+        # 将新格式转换为内部 background 格式
+        background = {}
+
+        # 学科
+        if req.subject:
+            background["subject"] = req.subject
+
+        # 当前 PPT 页（取第一条，如果有的话）
+        if req.current_ppt and len(req.current_ppt) > 0:
+            ppt_slide = req.current_ppt[0]
+            background["slide_no"] = ppt_slide.get("slide_no")
+            background["slides"] = [ppt_slide]
+
+        # 对话历史：转换为 teacher_utterances_on_slide 格式（仅取 teacher 角色）
+        # 同时保留 student_utterances_on_slide（取 student 角色）用于接力回答
+        teacher_utterances = []
+        student_utterances = []
+        if req.chat_history:
+            for msg in req.chat_history:
+                if msg.role == "teacher":
+                    teacher_utterances.append({"ts": req.current_timestamp or "", "text": msg.content})
+                elif msg.role == "student":
+                    student_utterances.append({"ts": req.current_timestamp or "", "text": msg.content, "student_id": ""})
+
+        if teacher_utterances:
+            background["teacher_utterances_on_slide"] = teacher_utterances
+        if student_utterances:
+            background["student_utterances_on_slide"] = student_utterances
+
+        # questioning / relay_answer 的唯一区分：digest 是否为 null（见 Supervisor 内逻辑）
+        background["called_student_status_digest"] = req.called_student_status_digest
+
+        return inclass_supervisor_v2.decide(
+            teacher_text=req.teacher_text,
+            teacher_text_ts=req.current_timestamp,
+            background=background,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=make_error_response("AI_DECISION_ERROR", str(e)),
+        )
+
+
+@app.post("/ai/v2/postclass/report/generate")
+def v2_postclass_report_generate(body: ReportGenerateRequest):
+    """课后报告（LLM3）。"""
+    try:
+        return postclass_report_llm.run(
+            lesson_json=body.lesson_json,
+            segment_evals=body.segment_evals,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=make_error_response("AI_LLM_ERROR", str(e)),
         )
 
 
@@ -366,6 +461,12 @@ def agent_reply(request: AgentRequest):
     """
     生成学生 Agent 的回复
     
+    支持多轮对话场景：
+    - 正常回答：被老师点名后正常作答
+    - 未准备被点名：懵逼、答不上来
+    - 被发现违纪：慌张解释
+    - 接力回答：第二个被点名时接上前面的讨论
+    
     返回格式（符合 api.md 4.2）：
     {
         "agent_type": "gangjing",
@@ -373,7 +474,16 @@ def agent_reply(request: AgentRequest):
         "emotion": "curious"
     }
     
-    emotion 可选值：curious(好奇), confused(听不懂), sleepy(困倦), active(积极), whispering(交头接耳)
+    emotion 可选值：
+    - curious(好奇/质疑): 学优生主动提问
+    - confused(听不懂): 学困生困惑
+    - sleepy(困倦): 打瞌睡状态
+    - active(积极): 积极回应
+    - whispering(交头接耳): 私下讨论
+    - hesitant(犹豫/怯懦): 学困生紧张
+    - panicked(慌张): 被发现违纪
+    - embarrassed(尴尬/羞愧): 违纪后被批评
+    - idle(无反应): 不触发
     """
     if request.agent_type not in ["gangjing", "xuekun", "sleepy", "whisper"]:
         raise HTTPException(
@@ -382,10 +492,25 @@ def agent_reply(request: AgentRequest):
         )
     
     try:
-        result = student_agent.generate_reply(
-            agent_type=request.agent_type,
-            context=request.context,
-            subject=request.subject
+        # 构建带对话历史的 context
+        context = request.context
+        if request.chat_history:
+            history_str = "\n".join([
+                f"{msg.role}: {msg.content}"
+                for msg in request.chat_history[-5:]  # 取最近5轮
+            ])
+            context = f"对话历史：\n{history_str}\n\n当前情境：{context}"
+        
+        # 使用新的 InclassStudentAgent 接口
+        result = student_agent.reply(
+            student_type=request.agent_type,
+            trigger_reason="test",
+            background={
+                "subject": request.subject,
+                "context": context,
+            },
+            is_triggered=False,
+            is_proactive_speaking=True,
         )
         return result
     except Exception as e:
@@ -398,22 +523,33 @@ def agent_reply(request: AgentRequest):
 @app.get("/test/agent/{agent_type}")
 def test_agent(
     agent_type: str,
-    context: str = "老师刚讲完勾股定理的定义"
+    context: str = "老师刚讲完勾股定理的定义",
+    subject: str = "数学"
 ):
-    """
+    r"""
     测试 Agent 功能
-    
+
     用法：
-        curl http://localhost:8001/test/agent/gangjing?context=老师刚讲完勾股定理
+        curl http://localhost:8001/test/agent/gangjing?context=老师刚讲完勾股定理\&subject=数学
     """
     if agent_type not in ["gangjing", "xuekun", "sleepy", "whisper"]:
         raise HTTPException(
             status_code=400,
             detail=make_error_response("AI_INVALID_AGENT_TYPE", f"无效的 agent_type: {agent_type}")
         )
-    
+
     try:
-        result = student_agent.generate_reply(agent_type, context, "数学")
+        # 使用新的 InclassStudentAgent 接口
+        result = student_agent.reply(
+            student_type=agent_type,
+            trigger_reason="test",
+            background={
+                "subject": subject,
+                "context": context,
+            },
+            is_triggered=False,
+            is_proactive_speaking=True,
+        )
         return result
     except Exception as e:
         raise HTTPException(
@@ -454,22 +590,22 @@ async def test_full_pipeline(
         else:
             lesson_info = await parse_lesson(file)
         
-        # Supervisor 决策
-        supervisor_result = supervisor.decide(
+        # v2 Supervisor 决策（内部推断 dialog_state）
+        supervisor_result = inclass_supervisor_v2.decide(
             teacher_text=teacher_text,
-            lesson_topic=lesson_info.get("basic_info", {}).get("lesson_topic", "未命名课程"),
-            subject=lesson_info.get("basic_info", {}).get("subject", "未识别学科"),
-            current_topic=lesson_info.get("knowledge_points", [{}])[0].get("point", "")
+            teacher_text_ts=None,
+            background={
+                "subject": lesson_info.get("basic_info", {}).get("subject", "未识别学科"),
+                "slide_no": None,
+                "slides": [],
+                "teacher_utterances_on_slide": [],
+            },
         )
         
         # 如果需要 Agent 回复
         agent_result = None
-        if supervisor_result.get("trigger_agent"):
-            agent_result = student_agent.generate_reply(
-                agent_type=supervisor_result["trigger_agent"],
-                context=supervisor_result.get("agent_prompt", "请回应老师"),
-                subject=lesson_info.get("basic_info", {}).get("subject", "数学")
-            )
+        if supervisor_result.get("student_event"):
+            agent_result = supervisor_result.get("student_event")
         
         return {
             "lesson_info": lesson_info,
@@ -498,7 +634,6 @@ if __name__ == "__main__":
 ╠══════════════════════════════════════════════════════════════╣
 ║  测试接口:                                                    ║
 ║  - POST /test/rag          测试教案解析（支持多文件）        ║
-║  - POST /test/supervisor   测试主控决策                      ║
 ║  - GET  /test/agent/{{type}} 测试学生 Agent                   ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  错误码规范: GET /error-codes                                ║

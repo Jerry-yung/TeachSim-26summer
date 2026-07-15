@@ -2,6 +2,7 @@
 import io
 import re
 from pathlib import Path
+from typing import List
 
 from pypdf import PdfReader
 from docx import Document
@@ -90,6 +91,67 @@ class DocumentParser:
                     text_parts.append("\n".join(slide_text))
             
             return "\n\n=== 新幻灯片 ===\n\n".join(text_parts)
+        except ImportError:
+            raise ValueError("解析 PPT 需要安装 python-pptx: pip install python-pptx")
+        except Exception as e:
+            raise ValueError(f"PPT 解析失败: {str(e)}")
+
+    @staticmethod
+    def _pptx_picture_blobs_from_shape(shape, acc: List[bytes], max_n: int, max_bytes: int) -> None:
+        """递归收集幻灯片中的嵌入图片（含组合图形内）。"""
+        try:
+            from pptx.enum.shapes import MSO_SHAPE_TYPE
+        except ImportError:
+            return
+        try:
+            st = shape.shape_type
+        except Exception:
+            return
+        if st == MSO_SHAPE_TYPE.PICTURE:
+            try:
+                blob = shape.image.blob
+                if blob and len(blob) <= max_bytes and len(acc) < max_n:
+                    acc.append(blob)
+            except Exception:
+                pass
+        elif st == MSO_SHAPE_TYPE.GROUP:
+            for sub in getattr(shape, "shapes", []):
+                DocumentParser._pptx_picture_blobs_from_shape(sub, acc, max_n, max_bytes)
+
+    @staticmethod
+    def parse_pptx_slides(file_bytes: bytes) -> List[dict]:
+        """按页解析 pptx：文本 + 每页嵌入图片二进制（供 VLM 使用）。
+
+        返回元素字段：
+        - slide_no, title, raw_text, image_blobs（内部使用，不出现在最终 API 时可剥离）
+        - visual_elements 占位为空列表，由 PreclassPptLLM+VLM 填充
+        """
+        try:
+            from pptx import Presentation
+            prs = Presentation(io.BytesIO(file_bytes))
+            slides: List[dict] = []
+            max_images = 3
+            max_bytes = 1_500_000  # 单张约 1.5MB，避免超出视觉 API 限制
+            for idx, slide in enumerate(prs.slides, start=1):
+                texts = []
+                for shape in slide.shapes:
+                    if hasattr(shape, "text") and shape.text.strip():
+                        texts.append(shape.text.strip())
+                raw_text = "\n".join(texts)
+                title = texts[0][:120] if texts else ""
+                blobs: List[bytes] = []
+                for shape in slide.shapes:
+                    DocumentParser._pptx_picture_blobs_from_shape(shape, blobs, max_images, max_bytes)
+                slides.append(
+                    {
+                        "slide_no": idx,
+                        "title": title,
+                        "raw_text": raw_text,
+                        "image_blobs": blobs,
+                        "visual_elements": [],
+                    }
+                )
+            return slides
         except ImportError:
             raise ValueError("解析 PPT 需要安装 python-pptx: pip install python-pptx")
         except Exception as e:

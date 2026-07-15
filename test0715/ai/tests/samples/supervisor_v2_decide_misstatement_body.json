@@ -1,0 +1,25 @@
+{
+  "teacher_text": "只要知道任意三角形两边就能直接套勾股定理求第三边。",
+  "current_timestamp": "2026-04-16T08:05:42+08:00",
+  "subject": "初中数学",
+  "chat_history": [
+    {
+      "role": "teacher",
+      "content": "在直角三角形里，a²+b²=c²。"
+    },
+    {
+      "role": "teacher",
+      "content": "只要知道任意三角形两边就能直接套勾股定理求第三边。"
+    }
+  ],
+  "current_ppt": [
+    {
+      "slide_no": 2,
+      "title": "勾股定理与前提",
+      "text_blocks": ["在直角三角形中", "两直角边的平方和等于斜边的平方", "a² + b² = c²", "适用前提：直角三角形"],
+      "visual_elements": ["直角三角形标注 a、b、c", "公式动画"],
+      "summary": "强调定理仅适用于直角三角形"
+    }
+  ],
+  "called_student_status_digest": null
+}

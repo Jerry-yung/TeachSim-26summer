@@ -10,8 +10,8 @@ import httpx
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 
-# 加载项目根目录的 .env
-_env_path = Path(__file__).resolve().parent.parent / ".env"
+# 加载项目根目录的 .env（llm.py 在 ai/setting/ 下，向上两级到项目根目录）
+_env_path = Path(__file__).resolve().parent.parent.parent / ".env"
 load_dotenv(_env_path)
 
 # 不走系统环境变量里的 HTTP(S)_PROXY，避免本地代理未开或返回 403 时 LLM 请求静默失败。
@@ -103,3 +103,5 @@ class LLM_siliconflow_minimax:
 # llm = LLM_moonshot_kimi() # 需在 .env 中配置 MOONSHOT_API_KEY
 # llm = LLM_siliconflow_minimax()
 llm = LLM_siliconflow_deepseek()
+# 多模态 / 视觉：PPT 配图解析等（需在 .env 配置 SILICONFLOW_API_KEY）
+vlm = LLM_siliconflow_vision()
