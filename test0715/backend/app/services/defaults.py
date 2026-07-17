@@ -75,6 +75,15 @@ DEFAULT_TEACHER_QUESTIONS = [
         ],
     },
     {
+        "id": "discipline_simulation_level",
+        "type": "radio",
+        "label": "课堂纪律事件模拟强度（睡觉/交头接耳）",
+        "emoji": "🚨",
+        "required": False,
+        "skippable": True,
+        "options": ["高频（重点训练）", "中频", "低频", "关闭（不触发）"],
+    },
+    {
         "id": "atmosphere",
         "type": "radio",
         "label": "您期望的课堂氛围是？",

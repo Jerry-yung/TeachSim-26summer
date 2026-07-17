@@ -24,8 +24,10 @@ class InclassUtteranceRequest(BaseModel):
     content: str
     current_timestamp: str
     called_student_id: Optional[str] = None
+    discipline_student_id: Optional[str] = None  # 前端触发 discipline 时的目标学生
     current_ppt: Optional[List[Dict[str, Any]]] = None
     skip_supervisor: bool = False
+    discipline_action: Optional[str] = None  # start_whisper | start_sleep | cancel_whisper | cancel_sleep
 
     @field_validator("role", "content", "current_timestamp")
     @classmethod
@@ -68,7 +70,30 @@ class InclassSegmentRequest(BaseModel):
         return value.strip()
 
 
+class StudentStateItem(BaseModel):
+    student_id: str
+    student_type: str
+    is_hand_raised: bool
+
+
+class InclassUtteranceResponse(BaseModel):
+    dialog_state: str
+    should_trigger_student: bool
+    trigger_reason: Optional[str] = None
+    target_student_type: Optional[str] = None
+    interaction_round_id: str
+    play_mode: str  # immediate | on_call_name
+    raised_hand_student_ids: List[str] = Field(default_factory=list)
+    preset_for_student_id: Optional[str] = None
+    student_states_digest: List[StudentStateItem] = Field(default_factory=list)
+    preset_consumed: bool = False
+    student_event: Optional[Any] = None
+
+
 class StudentStateResponse(BaseModel):
     student_id: str
     student_type: str
     is_hand_raised: bool
+    is_sleeping: bool = False
+    is_whispering: bool = False
+    student_name: str = ""

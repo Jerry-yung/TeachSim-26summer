@@ -58,6 +58,9 @@ class AIClient:
     async def supervisor_decide(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._post_json("/ai/v2/inclass/supervisor/decide", payload)
 
+    async def agent_reply(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self._post_json("/ai/agent/reply", payload)
+
     async def segment_eval(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._post_json("/ai/v2/inclass/segment/eval", payload)
 

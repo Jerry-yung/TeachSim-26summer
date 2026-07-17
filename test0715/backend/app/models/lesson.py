@@ -97,6 +97,9 @@ class ClassroomSession(Base):
     segments: Mapped[List["SessionSegment"]] = relationship(
         back_populates="session", cascade="all, delete-orphan"
     )
+    students: Mapped[List["SessionStudent"]] = relationship(
+        back_populates="session", cascade="all, delete-orphan"
+    )
 
 
 class Transcript(Base):

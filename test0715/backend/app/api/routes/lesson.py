@@ -15,6 +15,7 @@ from app.services.lesson_processing import (
     analyze_lesson_in_background,
     enrich_lesson_from_payload,
 )
+from app.services.student_state import initialize_session_students
 from app.services.lesson_runtime import build_min_lesson_payload, guess_subject_icon
 from app.services.storage import save_lesson_file
 
@@ -134,6 +135,10 @@ async def init_lesson(
         else None,
     )
     db.add(session)
+    db.commit()
+
+    # 初始化学生状态库
+    initialize_session_students(session.id, class_level, db=db)
     db.commit()
 
     if file is not None and lesson.embedding_status != "done":
