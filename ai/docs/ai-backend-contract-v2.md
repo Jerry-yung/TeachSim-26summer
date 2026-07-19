@@ -5,7 +5,7 @@
 ## 1. 通用约定
 
 - 编码：UTF-8
-- 时间戳：统一使用 ISO8601（含时区），示例 `2026-04-16T08:05:10+08:00`
+- 时间戳：统一使用 ISO8601（含时区），示例 `2026-07-19T08:05:10+08:00`
 - 请求追踪：后端应传 `trace_id`；AI 原样回传
 - 幂等键：涉及文件解析任务时，后端应传 `idempotency_key`
 
@@ -88,17 +88,39 @@
   - `trigger_reason`（string）
   - `target_student_type`（string|null）
   - `student_event`（object | object[] | null）
-    - 当 `dialog_state = questioning` 时，返回长度为 6 的数组，顺序为：学优主动、学优非主动、杠精主动、杠精非主动、学困主动、学困非主动。
+    - 当 `dialog_state = questioning` 时，返回 `null`。学生回复由前端点名后通过 `/ai/v2/inclass/student/reply` 实时获取，不再预生成 6 条候选。
     - 当 `dialog_state = relay_answer` 时，返回长度为 1 的数组：仅包含 `called_student_status_digest.student_type` 对应角色的一条候选，`is_triggered=false`，`is_proactive_speaking=true`（单条对象字段结构与 questioning 中每一项相同）。
     - 当 `dialog_state = ambiguous` 或 `misstatement` 时，返回单个对象。
+    - 当 `dialog_state = discipline_whisper` 或 `discipline_sleep` 时，返回单个对象。
     - 每个事件对象都包含：
       - `student_type`（string）
       - `emotion`（string）
       - `reply_text`（string）
-      - `is_triggered`（bool）：`ambiguous/misstatement` 为 `true`（即让前端自动触发让学生说话）；`questioning/relay_answer` 为 `false`（只有当老师在前端点击相应的学生后，才变为`true`，学生开始回答问题）。
-      - `is_proactive_speaking`（bool）：是否主动发言。`questioning` 同时覆盖 `true/false`；`relay_answer` 固定为 `true`；`ambiguous/misstatement` 固定为 `true`。
+      - `is_triggered`（bool）：`ambiguous/misstatement/discipline_*` 为 `true`（即让前端自动触发让学生说话）；`relay_answer` 为 `false`（只有当老师在前端点击相应的学生后，才变为`true`，学生开始回答问题）。
+      - `is_proactive_speaking`（bool）：是否主动发言。`relay_answer` 固定为 `true`；`ambiguous/misstatement/discipline_*` 固定为 `true`。
 
 说明：`student_event` 由 `SupervisorAgent` 在需要时内部调用 `StudentAgent` 生成；`should_trigger_student` 等与 `dialog_state` 的映射由 AI 侧固定规则保证一致。
+
+## 3.3 学生实时回复（StudentReply）
+
+前端在 `questioning` 场景下点名某位学生后，调用此接口按需生成单条回复。
+
+- 输入（后端 -> AI）：
+  - `student_type`（string, required）：`xueyou` | `gangjing` | `xuekun`
+  - `trigger_reason`（string, optional）：触发原因，默认 `"teacher_question"`
+  - `is_proactive_speaking`（bool, optional）：是否主动发言，默认 `true`
+  - `background`（object, required）：上下文信息，结构与 Supervisor 的 `background` 一致，至少包含：
+    - `subject`（string, optional）
+    - `slides`（array, optional）：当前 PPT 页
+    - `teacher_utterances_on_slide`（array, optional）：本页教师历史发言
+    - `student_utterances_on_slide`（array, optional）：本页学生历史发言
+
+- 输出（AI -> 后端）：
+  - `student_type`（string）
+  - `emotion`（string）
+  - `reply_text`（string）
+  - `is_triggered`（bool）：固定为 `false`
+  - `is_proactive_speaking`（bool）：与请求中一致
 
 ## 4. 课后契约
 
@@ -122,7 +144,7 @@
   "error_message": "internal llm error",
   "error_detail": "optional detail",
   "trace_id": "from-backend-or-ai",
-  "timestamp": "2026-04-16T08:10:00+08:00"
+  "timestamp": "2026-07-19T08:10:00+08:00"
 }
 ```
 

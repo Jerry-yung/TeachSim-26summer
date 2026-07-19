@@ -1,7 +1,7 @@
 """ LLM 模型设置
 
 统一入口：修改下方 llm = ... 即可切换大模型，所有 agents 自动使用。
-API 密钥从项目根目录 .env 读取，参考 .env.example 配置。
+API 密钥从项目根目录 `.env` 读取（可先复制 `.env.example` 为 `.env`；勿提交含密钥的 `.env`）。
 """
 import os
 from pathlib import Path
@@ -52,6 +52,14 @@ class LLM_ecnu_max:
             base_url="https://chat.ecnu.edu.cn/open/api/v1",
         )
 
+class LLM_deepseek:
+    def __init__(self):
+        self.model = _build_chat_model(
+            model="deepseek-v4-flash",
+            api_key=os.getenv("DEEPSEEK_API_KEY", ""),
+            base_url="https://api.deepseek.com",
+        )
+
 class LLM_siliconflow_deepseek:
     def __init__(self):
         self.model = _build_chat_model(
@@ -63,9 +71,9 @@ class LLM_siliconflow_deepseek:
 
 class LLM_moonshot_kimi:
     def __init__(self):
-        # Moonshot 的 kimi-k2.5 模型只支持 temperature=1
+        # Moonshot 的 kimi-k2.6 模型只支持 temperature=1
         self.model = ChatOpenAI(
-            model="kimi-k2.5",
+            model="kimi-k2.6",
             base_url="https://api.moonshot.cn/v1",
             api_key=os.getenv("MOONSHOT_API_KEY", ""),
             http_client=_HTTP_SYNC,
@@ -99,9 +107,15 @@ class LLM_siliconflow_minimax:
         )
 
 # 统一入口：切换模型只需修改此行（如 LLM_moonshot()）
+llm = LLM_deepseek()
 # llm = LLM_ecnu_max() # 需在 .env 中配置 ECNU_API_KEY
 # llm = LLM_moonshot_kimi() # 需在 .env 中配置 MOONSHOT_API_KEY
 # llm = LLM_siliconflow_minimax()
-llm = LLM_siliconflow_deepseek()
-# 多模态 / 视觉：PPT 配图解析等（需在 .env 配置 SILICONFLOW_API_KEY）
-vlm = LLM_siliconflow_vision()
+# llm = LLM_siliconflow_deepseek()
+
+# 课后报告 llm
+report_llm = LLM_deepseek()
+# report_llm = LLM_ecnu_max()
+
+# 多模态 / 视觉：PPT 配图解析等（需在 .env 配置 MOONSHOT_API_KEY）
+vlm = LLM_moonshot_kimi()

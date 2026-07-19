@@ -117,7 +117,7 @@ class SupervisorV2Request(BaseModel):
 
     字段说明：
     - teacher_text: 教师本轮发言内容（必填）
-    - current_timestamp: 当前时间戳（ISO8601，可选但建议必传）
+    - class_elapsed_sec: 教师本轮发言发生时的课内计时器秒数（可选，建议必传）
     - subject: 学科（如"初中数学"，可选）
     - chat_history: 对话历史（可选），包含教师和学生发言
     - current_ppt: 当前 PPT 页内容（可选），结构与 PPT 结构化输出的 slides[] 单条一致
@@ -125,7 +125,7 @@ class SupervisorV2Request(BaseModel):
       组合为 questioning；非 null 时为 relay_answer（与 questioning 语义依据相同，仅由此字段区分）
     """
     teacher_text: str
-    current_timestamp: Optional[str] = None  # ISO8601，表示当前时刻
+    class_elapsed_sec: Optional[int] = None  # 课内计时器秒数
     subject: Optional[str] = None  # 学科
     chat_history: Optional[List[ChatMessage]] = None  # 对话历史
     current_ppt: Optional[List[Dict[str, Any]]] = None  # 当前 PPT 页（仅一条）
@@ -135,6 +135,15 @@ class SupervisorV2Request(BaseModel):
 class ReportGenerateRequest(BaseModel):
     lesson_json: Dict[str, Any]
     segment_evals: List[Dict[str, Any]]
+
+
+class StudentReplyV2Request(BaseModel):
+    """v2 学生实时回复：由前端点名后调用，按需生成单条回复。"""
+
+    student_type: str  # xueyou | gangjing | xuekun
+    trigger_reason: str = "teacher_question"
+    is_proactive_speaking: bool = True
+    background: Dict[str, Any] = {}
 
 
 # ============ 健康检查 ============
@@ -389,12 +398,22 @@ def v2_inclass_segment_eval(body: Dict[str, Any] = Body(...)):
 def v2_inclass_supervisor_decide(req: SupervisorV2Request):
     """主控 + 直连 student agent（v2）。
 
-    支持两种调用方式：
-    1. 新格式：teacher_text + current_timestamp + subject + chat_history + current_ppt
-       + called_student_status_digest
-    2. 旧格式兼容：通过 background 字段（已废弃，向后兼容）
+    新格式：teacher_text + class_elapsed_sec + subject + chat_history + current_ppt
+    + called_student_status_digest
     """
     try:
+        def _class_time_label(elapsed_sec: Optional[int]) -> str:
+            if elapsed_sec is None:
+                return ""
+            try:
+                sec = max(int(elapsed_sec), 0)
+            except (TypeError, ValueError):
+                return ""
+            m = sec // 60
+            s = sec % 60
+            return f"{m:02d}:{s:02d}"
+
+        class_ts = _class_time_label(req.class_elapsed_sec)
         # 将新格式转换为内部 background 格式
         background = {}
 
@@ -415,9 +434,9 @@ def v2_inclass_supervisor_decide(req: SupervisorV2Request):
         if req.chat_history:
             for msg in req.chat_history:
                 if msg.role == "teacher":
-                    teacher_utterances.append({"ts": req.current_timestamp or "", "text": msg.content})
+                    teacher_utterances.append({"ts": class_ts, "text": msg.content})
                 elif msg.role == "student":
-                    student_utterances.append({"ts": req.current_timestamp or "", "text": msg.content, "student_id": ""})
+                    student_utterances.append({"ts": class_ts, "text": msg.content, "student_id": ""})
 
         if teacher_utterances:
             background["teacher_utterances_on_slide"] = teacher_utterances
@@ -429,13 +448,32 @@ def v2_inclass_supervisor_decide(req: SupervisorV2Request):
 
         return inclass_supervisor_v2.decide(
             teacher_text=req.teacher_text,
-            teacher_text_ts=req.current_timestamp,
+            teacher_text_ts=class_ts or None,
             background=background,
         )
     except Exception as e:
         raise HTTPException(
             status_code=500,
             detail=make_error_response("AI_DECISION_ERROR", str(e)),
+        )
+
+
+@app.post("/ai/v2/inclass/student/reply")
+def v2_inclass_student_reply(req: StudentReplyV2Request):
+    """学生实时回复（v2）：前端点名后按需调用，只生成单条回复。"""
+    try:
+        result = student_agent.reply(
+            student_type=req.student_type,
+            trigger_reason=req.trigger_reason,
+            background=req.background,
+            is_triggered=False,
+            is_proactive_speaking=req.is_proactive_speaking,
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=make_error_response("AI_LLM_ERROR", str(e)),
         )
 
 

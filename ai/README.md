@@ -27,28 +27,23 @@
 
 ## 快速开始
 
-1. 安装依赖
+1. 安装依赖（与后端共用仓库根目录 `.venv`，见主 `README.md`）
 
 ```bash
-cd ai
-pip install -r requirements.txt
+# 已在仓库根目录激活 .venv 后：
+pip install -r ai/requirements.txt
 ```
 
-1. 配置密钥（在项目根目录）
+2. 配置密钥（在项目根目录 `cp .env.example .env`，填写各供应商 API Key；勿提交 `.env`）
 
-```bash
-cp .env.example .env
-# 然后填写对应供应商 API Key
-```
-
-1. 启动服务
+3. 启动服务
 
 ```bash
 cd ai
 python main.py
 ```
 
-1. 按测试手册联调
+4. 按测试手册联调
 
 直接使用 [测试.md](./测试.md) 中的 curl 命令，不使用 Python 测试脚本。
 
