@@ -97,3 +97,18 @@ class StudentStateResponse(BaseModel):
     is_sleeping: bool = False
     is_whispering: bool = False
     student_name: str = ""
+
+
+class StudentReplyRequest(BaseModel):
+    session_id: str
+    student_id: str
+    current_timestamp: str
+    current_ppt: Optional[List[Dict[str, Any]]] = None
+
+
+class StudentReplyResponse(BaseModel):
+    student_id: str
+    student_type: str
+    reply_text: str
+    emotion: str
+    is_proactive_speaking: bool

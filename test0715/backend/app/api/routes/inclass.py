@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+import logging
+from datetime import datetime, timezone
+from pathlib import Path
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -12,6 +16,8 @@ from app.schemas.inclass import (
     InclassSegmentRequest,
     InclassUtteranceRequest,
     InclassUtteranceResponse,
+    StudentReplyRequest,
+    StudentReplyResponse,
     StudentStateItem,
     StudentStateResponse,
 )
@@ -31,6 +37,16 @@ from app.services.student_state import (
 
 router = APIRouter(prefix="/inclass", tags=["inclass"])
 
+_DECISION_LOGGER = logging.getLogger("inclass_decision_snapshot")
+if not _DECISION_LOGGER.handlers:
+    _log_dir = Path(__file__).resolve().parents[3] / "logs"
+    _log_dir.mkdir(parents=True, exist_ok=True)
+    _fh = logging.FileHandler(_log_dir / "inclass_decisions.jsonl", encoding="utf-8")
+    _fh.setFormatter(logging.Formatter("%(message)s"))
+    _DECISION_LOGGER.addHandler(_fh)
+    _DECISION_LOGGER.setLevel(logging.INFO)
+    _DECISION_LOGGER.propagate = False
+
 # 旧格式兼容：当不触发或异常时返回的空响应
 EMPTY_SUPERVISOR_RESPONSE = {
     "dialog_state": "normal",
@@ -40,13 +56,46 @@ EMPTY_SUPERVISOR_RESPONSE = {
     "student_event": None,
 }
 
-# discipline 对应的 agent_type
-DISCIPLINE_AGENT_MAP = {
-    "start_whisper": "whisper",
-    "cancel_whisper": "whisper",
-    "start_sleep": "sleepy",
-    "cancel_sleep": "sleepy",
+# 兼容前端 discipline_action 写法
+DISCIPLINE_ACTION_ALIASES = {
+    "whisper": "start_whisper",
+    "sleep": "start_sleep",
 }
+
+
+def _log_decision_snapshot(
+    *,
+    session_id: uuid.UUID,
+    stage: str,
+    request: InclassUtteranceRequest,
+    response: dict | None = None,
+    supervisor_payload: dict | None = None,
+    supervisor_raw: dict | None = None,
+    note: str | None = None,
+) -> None:
+    try:
+        row = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "session_id": str(session_id),
+            "stage": stage,
+            "request": {
+                "role": request.role,
+                "content": request.content,
+                "current_timestamp": request.current_timestamp,
+                "called_student_id": request.called_student_id,
+                "discipline_student_id": request.discipline_student_id,
+                "discipline_action": request.discipline_action,
+                "skip_supervisor": request.skip_supervisor,
+            },
+            "supervisor_payload": supervisor_payload,
+            "supervisor_raw": supervisor_raw,
+            "response": response,
+            "note": note,
+        }
+        _DECISION_LOGGER.info(json.dumps(row, ensure_ascii=False))
+    except Exception:
+        # 决策日志不可影响主流程
+        return
 
 
 def _parse_uuid(raw: str, name: str) -> uuid.UUID:
@@ -144,7 +193,8 @@ async def post_utterance(
     db.add(turn)
     if session.started_at is None:
         session.started_at = event_ts
-    session.status = "active"
+    if session.status != "active":
+        session.status = "active"
     db.flush()
 
     # 查询全班状态
@@ -153,11 +203,28 @@ async def post_utterance(
 
     # 2. 处理 discipline 事件（前端直接触发，不调用 supervisor）
     if body.discipline_action:
+        discipline_action = DISCIPLINE_ACTION_ALIASES.get(
+            body.discipline_action, body.discipline_action
+        )
         # 优先使用 discipline_student_id，兼容 called_student_id
         target_student_id = body.discipline_student_id or body.called_student_id
         if not target_student_id:
             db.commit()
             return _build_empty_response(session_students, interaction_round_id)
+
+        target_student = get_session_student(session.id, target_student_id, db)
+        # 互斥：举手中的学生不能被随机纪律事件命中
+        if target_student is not None and target_student.is_hand_raised:
+            db.commit()
+            resp = _build_empty_response(session_students, interaction_round_id)
+            _log_decision_snapshot(
+                session_id=session.id,
+                stage="discipline_rejected_conflict",
+                request=body,
+                response=resp.model_dump(),
+                note=f"target {target_student_id} is hand_raised, discipline skipped",
+            )
+            return resp
 
         # 强制"同一时间只有一个 sleep/whisper"规则：先重置其他学生的状态
         for s in session_students:
@@ -167,68 +234,52 @@ async def post_utterance(
 
         # 更新目标学生的状态
         student = update_discipline_state(
-            session.id, target_student_id, body.discipline_action, db
-        )
+            session.id, target_student_id, discipline_action, db
         )
         if student is None:
             db.commit()
             return _build_empty_response(session_students, interaction_round_id)
 
-        # 调用 AI agent_reply 生成回复
-        agent_type = DISCIPLINE_AGENT_MAP.get(body.discipline_action, "whisper")
-        context_map = {
-            "start_whisper": f"{student.student_name}正在和同学交头接耳，被老师发现了。",
-            "cancel_whisper": f"{student.student_name}刚才在交头接耳，现在被老师点名了，需要慌张解释。",
-            "start_sleep": f"{student.student_name}正在课堂上打瞌睡，被老师发现了。",
-            "cancel_sleep": f"{student.student_name}刚才在课堂上睡觉，现在被老师点名了，需要慌张解释。",
-        }
-        context = context_map.get(body.discipline_action, "课堂纪律事件")
-
-        ai_client = AIClient()
-        try:
-            agent_result = await ai_client.agent_reply(
-                {
-                    "agent_type": agent_type,
-                    "context": context,
-                    "subject": session.lesson.subject,
-                    "chat_history": [],
-                }
-            )
-        except AIServiceError:
-            agent_result = {
-                "agent_type": agent_type,
-                "reply_text": "……",
-                "emotion": "panicked" if "cancel" in body.discipline_action else "whispering",
-            }
-
-        # 刷新状态
+        # discipline_action 分支只负责状态库写入，不触发 student_event 语音
         db.commit()
         session_students = get_session_students(session.id, db)
-
-        dialog_state = (
-            "discipline_whisper"
-            if "whisper" in body.discipline_action
-            else "discipline_sleep"
-        )
-
-        return InclassUtteranceResponse(
-            dialog_state=dialog_state,
-            should_trigger_student=True,
-            trigger_reason=body.discipline_action,
-            target_student_type=agent_type,
+        resp = InclassUtteranceResponse(
+            dialog_state="normal",
+            should_trigger_student=False,
+            trigger_reason=discipline_action,
+            target_student_type=None,
             interaction_round_id=interaction_round_id,
             play_mode="immediate",
             raised_hand_student_ids=[],
-            preset_for_student_id=target_student_id,
+            preset_for_student_id=None,
             student_states_digest=build_student_states_digest(session_students),
             preset_consumed=False,
-            student_event=agent_result,
+            student_event=None,
         )
+        _log_decision_snapshot(
+            session_id=session.id,
+            stage="discipline_state_only",
+            request=body,
+            response=resp.model_dump(),
+            note="discipline start/cancel only updates state store",
+        )
+        return resp
 
     # 3. 非教师发言或跳过 supervisor
     if role_type != "teacher" or body.skip_supervisor:
+        # 学生回答入库后清空举手状态，避免旧轮次举手残留
+        if role_type != "teacher":
+            reset_hand_raised(session.id, db)
+            session_students = get_session_students(session.id, db)
         db.commit()
-        return _build_empty_response(session_students, interaction_round_id)
+        resp = _build_empty_response(session_students, interaction_round_id)
+        _log_decision_snapshot(
+            session_id=session.id,
+            stage="skip_supervisor",
+            request=body,
+            response=resp.model_dump(),
+        )
+        return resp
 
     # 4. 正常教师发言流程
     # 4.1 重置举手状态（新一轮开始）
@@ -271,6 +322,13 @@ async def post_utterance(
         result = await ai_client.supervisor_decide(payload)
     except AIServiceError as exc:
         db.rollback()
+        _log_decision_snapshot(
+            session_id=session.id,
+            stage="supervisor_error",
+            request=body,
+            supervisor_payload=payload,
+            note=str(exc),
+        )
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
     dialog_state = result.get("dialog_state", "normal")
@@ -287,7 +345,11 @@ async def post_utterance(
     if dialog_state == "questioning" and should_trigger:
         play_mode = "on_call_name"
         # 随机挑 2 个同学举手
-        all_students = [s.student_id for s in session_students]
+        all_students = [
+            s.student_id
+            for s in session_students
+            if (not s.is_sleeping and not s.is_whispering)
+        ]
         rng = __import__("random").Random(str(session.id) + interaction_round_id)
         rng.shuffle(all_students)
         raised_hand_ids = all_students[:2]
@@ -340,7 +402,7 @@ async def post_utterance(
     # 刷新状态用于响应
     session_students = get_session_students(session.id, db)
 
-    return InclassUtteranceResponse(
+    resp = InclassUtteranceResponse(
         dialog_state=dialog_state,
         should_trigger_student=should_trigger,
         trigger_reason=trigger_reason,
@@ -352,6 +414,91 @@ async def post_utterance(
         student_states_digest=build_student_states_digest(session_students),
         preset_consumed=False,
         student_event=student_event,
+    )
+    _log_decision_snapshot(
+        session_id=session.id,
+        stage="supervisor_decision",
+        request=body,
+        supervisor_payload=payload,
+        supervisor_raw=result,
+        response=resp.model_dump(),
+    )
+    return resp
+
+
+@router.post("/student-reply", response_model=StudentReplyResponse)
+async def post_student_reply(
+    body: StudentReplyRequest,
+    db: Session = Depends(get_db),
+):
+    """前端点名后实时获取被点名学生的单条回复。"""
+    session = _get_session_or_404(db, body.session_id)
+
+    # 1. 获取目标学生状态
+    student = get_session_student(session.id, body.student_id, db)
+    if student is None:
+        raise HTTPException(status_code=404, detail="student 不存在")
+
+    # 2. 查询最近 20 轮对话历史
+    recent_turns = (
+        db.query(SessionTurn)
+        .filter(SessionTurn.session_id == session.id)
+        .order_by(SessionTurn.event_ts.desc(), SessionTurn.created_at.desc())
+        .limit(20)
+        .all()
+    )
+    chat_history = _build_chat_history(recent_turns)
+
+    # 3. 构造 background
+    background: dict[str, Any] = {"subject": session.lesson.subject}
+
+    # PPT 上下文
+    if body.current_ppt and len(body.current_ppt) > 0:
+        ppt_slide = body.current_ppt[0]
+        background["slide_no"] = ppt_slide.get("slide_no")
+        background["slides"] = [ppt_slide]
+
+    # 对话历史拆分为 teacher / student utterances
+    teacher_utterances = []
+    student_utterances = []
+    for msg in chat_history:
+        if msg.get("role") == "teacher":
+            teacher_utterances.append(
+                {"ts": body.current_timestamp or "", "text": msg.get("content", "")}
+            )
+        elif msg.get("role") == "student":
+            student_utterances.append(
+                {
+                    "ts": body.current_timestamp or "",
+                    "text": msg.get("content", ""),
+                    "student_id": "",
+                }
+            )
+    if teacher_utterances:
+        background["teacher_utterances_on_slide"] = teacher_utterances
+    if student_utterances:
+        background["student_utterances_on_slide"] = student_utterances
+
+    # 4. 调用 AI 模块生成单条回复
+    ai_client = AIClient()
+    try:
+        ai_result = await ai_client.student_reply(
+            {
+                "student_type": student.student_type,
+                "trigger_reason": "teacher_question",
+                "is_proactive_speaking": student.is_hand_raised,
+                "background": background,
+            }
+        )
+    except AIServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+    return StudentReplyResponse(
+        student_id=student.student_id,
+        student_type=student.student_type,
+        reply_text=ai_result.get("reply_text", "（无回复）"),
+        emotion=ai_result.get("emotion", "idle"),
+        is_proactive_speaking=ai_result.get("is_proactive_speaking", student.is_hand_raised),
     )
 
 
@@ -412,7 +559,8 @@ async def post_segment(
 
     if session.started_at is None:
         session.started_at = start_ts
-    session.status = "active"
+    if session.status != "active":
+        session.status = "active"
 
     ppt_context = _resolve_ppt_context(session, body)
     ai_payload = {

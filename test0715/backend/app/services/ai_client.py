@@ -64,6 +64,9 @@ class AIClient:
     async def segment_eval(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._post_json("/ai/v2/inclass/segment/eval", payload)
 
+    async def student_reply(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self._post_json("/ai/v2/inclass/student/reply", payload)
+
     async def generate_report(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._post_json("/ai/v2/postclass/report/generate", payload)
 

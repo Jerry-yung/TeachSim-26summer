@@ -141,16 +141,16 @@ def update_discipline_state(
 ) -> SessionStudent | None:
     """更新纪律状态。
 
-    action: start_whisper | start_sleep | cancel_whisper | cancel_sleep
+    action: whisper | sleep | start_whisper | start_sleep | cancel_whisper | cancel_sleep
     """
     student = get_session_student(session_id, student_id, db)
     if student is None:
         return None
 
-    if action == "start_whisper":
+    if action in ("start_whisper", "whisper"):
         student.is_whispering = True
         student.is_sleeping = False
-    elif action == "start_sleep":
+    elif action in ("start_sleep", "sleep"):
         student.is_sleeping = True
         student.is_whispering = False
     elif action == "cancel_whisper":
@@ -177,6 +177,9 @@ def pick_random_students_by_type(
         .filter(
             SessionStudent.session_id == session_id,
             SessionStudent.student_type == student_type,
+            # 互斥：睡觉/交头接耳不参与新一轮挑选
+            SessionStudent.is_sleeping.is_(False),
+            SessionStudent.is_whispering.is_(False),
         )
     )
     if exclude_ids:

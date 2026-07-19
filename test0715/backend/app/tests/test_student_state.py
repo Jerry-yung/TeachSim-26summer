@@ -154,3 +154,32 @@ class TestResponseSchema:
         assert resp.dialog_state == "questioning"
         assert resp.play_mode == "on_call_name"
         assert resp.raised_hand_student_ids == ["student_xm", "student_xw"]
+
+    def test_student_reply_response(self):
+        from app.schemas.inclass import StudentReplyResponse
+
+        resp = StudentReplyResponse(
+            student_id="student_xm",
+            student_type="xueyou",
+            reply_text="老师，我觉得这里可以用面积法来证明。",
+            emotion="curious",
+            is_proactive_speaking=True,
+        )
+        assert resp.student_id == "student_xm"
+        assert resp.student_type == "xueyou"
+        assert resp.reply_text == "老师，我觉得这里可以用面积法来证明。"
+        assert resp.emotion == "curious"
+        assert resp.is_proactive_speaking is True
+
+    def test_student_reply_request(self):
+        from app.schemas.inclass import StudentReplyRequest
+
+        req = StudentReplyRequest(
+            session_id="a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            student_id="student_xm",
+            current_timestamp="2026-04-22T10:00:00+08:00",
+            current_ppt=[{"slide_no": 1, "title": "测试页"}],
+        )
+        assert req.session_id == "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        assert req.student_id == "student_xm"
+        assert req.current_ppt[0]["slide_no"] == 1
