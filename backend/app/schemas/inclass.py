@@ -23,6 +23,7 @@ class InclassUtteranceRequest(BaseModel):
     role: str
     content: str
     current_timestamp: str
+    class_elapsed_sec: Optional[int] = None
     called_student_id: Optional[str] = None
     discipline_student_id: Optional[str] = None  # 前端触发 discipline 时的目标学生
     slide_no: Optional[int] = None
@@ -56,6 +57,8 @@ class InclassSegmentRequest(BaseModel):
     segment_id: str
     start_ts: str
     end_ts: str
+    start_elapsed_sec: Optional[int] = None
+    end_elapsed_sec: Optional[int] = None
     slide_no: Optional[int] = None
     teacher_utterances: List[SegmentTurnPayload] = Field(default_factory=list)
     student_utterances: List[SegmentTurnPayload] = Field(default_factory=list)
@@ -104,8 +107,12 @@ class StudentReplyRequest(BaseModel):
     session_id: str
     student_id: str
     current_timestamp: str
+    class_elapsed_sec: Optional[int] = None
     slide_no: Optional[int] = None
     current_ppt: Optional[List[Dict[str, Any]]] = None
+    question_bundle_text: Optional[str] = None
+    question_count: Optional[int] = None
+    question_items: Optional[List[Dict[str, Any]]] = None
 
 
 class StudentReplyResponse(BaseModel):

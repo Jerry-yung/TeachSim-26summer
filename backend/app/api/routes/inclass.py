@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 import uuid
@@ -9,6 +10,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
+from app.core.auth import get_current_teacher_id
 from app.db.session import get_db
 from app.models.lesson import ClassroomSession, SessionSegment, SessionTurn
 from app.models.session_student import SessionStudent
@@ -38,6 +40,8 @@ from app.services.student_state import (
 router = APIRouter(prefix="/inclass", tags=["inclass"])
 
 _DECISION_LOGGER = logging.getLogger("inclass_decision_snapshot")
+_LEGACY_TEACHER_ID = "legacy_teacher"
+
 if not _DECISION_LOGGER.handlers:
     _log_dir = Path(__file__).resolve().parents[3] / "logs"
     _log_dir.mkdir(parents=True, exist_ok=True)
@@ -67,6 +71,260 @@ _LESSON_SLIDE_CONTEXT_CACHE: dict[tuple[str, int], dict | None] = {}
 # 记录每个 session 最近一次使用的页号和 payload，页号不变时直接复用
 _SESSION_LAST_UTTERANCE_PPT_CACHE: dict[str, tuple[int, list[dict] | None]] = {}
 
+_NON_SEMANTIC_SHORT_WORDS = {
+    "嗯",
+    "啊",
+    "哦",
+    "诶",
+    "呃",
+    "哎",
+    "唉",
+    "额",
+    "哈",
+}
+_NON_SEMANTIC_SINGLE_FEEDBACK = {
+    "好",
+    "对",
+    "是",
+    "行",
+    "可以",
+}
+_QUESTION_CUES = {
+    "为什么",
+    "怎么",
+    "如何",
+    "是否",
+    "能不能",
+    "谁",
+    "哪",
+    "多少",
+    "是什么",
+    "是不是",
+}
+_TEACHING_ACTION_CUES = {
+    "看",
+    "讲",
+    "说",
+    "答",
+    "回答",
+    "解释",
+    "证明",
+    "比较",
+    "判断",
+    "计算",
+    "总结",
+    "复述",
+    "翻到",
+    "继续",
+    "停一下",
+    "重说一遍",
+    "举例",
+    "补充",
+    "纠错",
+}
+_CONTENT_CUES = {
+    "函数",
+    "三角",
+    "勾股",
+    "图像",
+    "公式",
+    "定义",
+    "条件",
+    "结论",
+    "方程",
+    "角",
+    "几何",
+    "代数",
+    "步骤",
+    "题",
+    "页",
+    "PPT",
+}
+_STRUCTURE_CUES = {"因为", "所以", "如果", "那么", "先", "再", "但是", "然后"}
+
+
+def _normalize_filter_text(text: str) -> str:
+    return re.sub(r"\s+", "", str(text or "")).strip()
+
+
+def _is_punctuation_only(text: str) -> bool:
+    if not text:
+        return True
+    return re.fullmatch(r"[，。！？!?、；：,.~`!@#$%^&*()\-_=+\[\]{}\\|/<>\"'“”‘’··…\s]+", text) is not None
+
+
+def _is_repeated_single_char_noise(text: str) -> bool:
+    if len(text) < 4:
+        return False
+    return len(set(text)) == 1 and text[0] in _NON_SEMANTIC_SHORT_WORDS
+
+
+def _contains_named_calling_intent(text: str, student_names: list[str]) -> bool:
+    action_group = r"(说|回答|你来|请回答|解释|补充|讲一下|来答|来讲)"
+    generic_patterns = [
+        rf"同学[，,、\s]*(?:你)?(?:来|先)?{action_group}",
+        rf"(?:请|麻烦|让)[，,、\s]*同学[，,、\s]*(?:来|先)?{action_group}",
+    ]
+    for pattern in generic_patterns:
+        if re.search(pattern, text):
+            return True
+
+    for raw_name in student_names:
+        name = str(raw_name or "").strip()
+        if not name:
+            continue
+        n = re.escape(name)
+        patterns = [
+            rf"{n}(?:同学)?[，,、\s]*(?:你)?(?:来|先)?{action_group}",
+            rf"(?:请|麻烦|让)?[，,、\s]*{n}(?:同学)?[，,、\s]*(?:来|先)?{action_group}",
+            rf"{n}(?:同学)?[，,、\s]*你说",
+            rf"{n}(?:同学)?[，,、\s]*回答",
+        ]
+        for pattern in patterns:
+            if re.search(pattern, text):
+                return True
+    return False
+
+
+def should_send_to_supervisor(
+    *,
+    text: str,
+    called_student_id: str | None,
+    session_students: list[SessionStudent],
+) -> dict:
+    normalized = _normalize_filter_text(text)
+    called_id = str(called_student_id or "").strip()
+    student_names = [str(s.student_name or "").strip() for s in session_students]
+    matched_rules: list[str] = []
+
+    if not normalized:
+        return {
+            "send": False,
+            "reason_code": "empty_text",
+            "layer": "hard_block",
+            "score": 0,
+            "normalized_text": normalized,
+            "matched_rules": ["empty_text"],
+        }
+    if _is_punctuation_only(normalized):
+        return {
+            "send": False,
+            "reason_code": "punct_only",
+            "layer": "hard_block",
+            "score": 0,
+            "normalized_text": normalized,
+            "matched_rules": ["punct_only"],
+        }
+    if normalized in _NON_SEMANTIC_SHORT_WORDS and len(normalized) <= 3:
+        return {
+            "send": False,
+            "reason_code": "filler_only_short",
+            "layer": "hard_block",
+            "score": 0,
+            "normalized_text": normalized,
+            "matched_rules": ["filler_only_short"],
+        }
+    if normalized in _NON_SEMANTIC_SINGLE_FEEDBACK:
+        return {
+            "send": False,
+            "reason_code": "single_feedback_only",
+            "layer": "hard_block",
+            "score": 0,
+            "normalized_text": normalized,
+            "matched_rules": ["single_feedback_only"],
+        }
+    if _is_repeated_single_char_noise(normalized):
+        return {
+            "send": False,
+            "reason_code": "repeat_noise",
+            "layer": "hard_block",
+            "score": 0,
+            "normalized_text": normalized,
+            "matched_rules": ["repeat_noise"],
+        }
+
+    # 语义白名单：命中立即放行
+    if re.search(r"[?？]", normalized):
+        return {
+            "send": True,
+            "reason_code": "whitelist_question_mark",
+            "layer": "semantic_whitelist",
+            "score": 0,
+            "normalized_text": normalized,
+            "matched_rules": ["question_mark"],
+        }
+    if any(cue in normalized for cue in _QUESTION_CUES):
+        return {
+            "send": True,
+            "reason_code": "whitelist_question_cue",
+            "layer": "semantic_whitelist",
+            "score": 0,
+            "normalized_text": normalized,
+            "matched_rules": ["question_cue"],
+        }
+    if _contains_named_calling_intent(normalized, student_names):
+        return {
+            "send": True,
+            "reason_code": "whitelist_named_calling",
+            "layer": "semantic_whitelist",
+            "score": 0,
+            "normalized_text": normalized,
+            "matched_rules": ["named_calling"],
+        }
+    if called_id:
+        called_student = next((s for s in session_students if s.student_id == called_id), None)
+        if called_student and str(called_student.student_name or "").strip() and str(called_student.student_name).strip() in normalized:
+            return {
+                "send": True,
+                "reason_code": "whitelist_called_student_named",
+                "layer": "semantic_whitelist",
+                "score": 0,
+                "normalized_text": normalized,
+                "matched_rules": ["called_student_named"],
+            }
+    if any(cue in normalized for cue in ("我们看", "翻到", "下一题", "这一步", "结论是", "注意这里")):
+        return {
+            "send": True,
+            "reason_code": "whitelist_teaching_progress",
+            "layer": "semantic_whitelist",
+            "score": 0,
+            "normalized_text": normalized,
+            "matched_rules": ["teaching_progress"],
+        }
+
+    # 打分兜底：低分才拦截，保守放行
+    score = 0
+    if any(cue in normalized for cue in _TEACHING_ACTION_CUES):
+        score += 2
+        matched_rules.append("action_cue")
+    if any(cue in normalized for cue in _CONTENT_CUES):
+        score += 2
+        matched_rules.append("content_cue")
+    if len(normalized) >= 6:
+        score += 1
+        matched_rules.append("length_ge_6")
+    if any(cue in normalized for cue in _STRUCTURE_CUES):
+        score += 1
+        matched_rules.append("structure_cue")
+
+    if score >= 2:
+        return {
+            "send": True,
+            "reason_code": "score_pass",
+            "layer": "score_fallback",
+            "score": score,
+            "normalized_text": normalized,
+            "matched_rules": matched_rules or ["score_pass"],
+        }
+    return {
+        "send": False,
+        "reason_code": "score_block_low_semantics",
+        "layer": "score_fallback",
+        "score": score,
+        "normalized_text": normalized,
+        "matched_rules": matched_rules or ["score_block_low_semantics"],
+    }
+
 
 def _log_decision_snapshot(
     *,
@@ -76,6 +334,7 @@ def _log_decision_snapshot(
     response: dict | None = None,
     supervisor_payload: dict | None = None,
     supervisor_raw: dict | None = None,
+    request_turn_id: str | None = None,
     note: str | None = None,
 ) -> None:
     try:
@@ -87,6 +346,7 @@ def _log_decision_snapshot(
                 "role": request.role,
                 "content": request.content,
                 "current_timestamp": request.current_timestamp,
+                "class_elapsed_sec": request.class_elapsed_sec,
                 "slide_no": request.slide_no,
                 "called_student_id": request.called_student_id,
                 "discipline_student_id": request.discipline_student_id,
@@ -98,10 +358,96 @@ def _log_decision_snapshot(
             "response": response,
             "note": note,
         }
+        if request_turn_id:
+            row["request_turn_id"] = request_turn_id
         _DECISION_LOGGER.info(json.dumps(row, ensure_ascii=False))
     except Exception:
         # 决策日志不可影响主流程
         return
+
+
+def _log_decision_event(
+    *,
+    session_id: uuid.UUID,
+    stage: str,
+    payload: dict,
+    note: str | None = None,
+) -> None:
+    try:
+        row = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "session_id": str(session_id),
+            "stage": stage,
+            **payload,
+        }
+        if note:
+            row["note"] = note
+        _DECISION_LOGGER.info(json.dumps(row, ensure_ascii=False))
+    except Exception:
+        return
+
+
+def _extract_resolved_student_event(student_event: Any) -> dict | None:
+    if isinstance(student_event, dict):
+        return student_event
+    if isinstance(student_event, list):
+        for item in student_event:
+            if isinstance(item, dict):
+                return item
+    return None
+
+
+def _log_resolved_interaction_event(
+    *,
+    session_id: uuid.UUID,
+    stage: str,
+    request: InclassUtteranceRequest,
+    request_turn_id: str,
+    interaction_round_id: str,
+    dialog_state: str,
+    student_event: Any,
+    preset_for_student_id: str | None,
+    session_students: list[SessionStudent],
+) -> None:
+    resolved = _extract_resolved_student_event(student_event)
+    if not isinstance(resolved, dict):
+        return
+    student_id = str(
+        resolved.get("student_id")
+        or preset_for_student_id
+        or ""
+    ).strip()
+    student_name = ""
+    if student_id:
+        one = next((s for s in session_students if s.student_id == student_id), None)
+        if one is not None:
+            student_name = str(one.student_name or "").strip()
+    row = {
+        "request": {
+            "role": request.role,
+            "content": request.content,
+            "current_timestamp": request.current_timestamp,
+            "class_elapsed_sec": request.class_elapsed_sec,
+            "slide_no": request.slide_no,
+            "called_student_id": request.called_student_id,
+        },
+        "request_turn_id": request_turn_id,
+        "interaction_round_id": interaction_round_id,
+        "dialog_state": dialog_state,
+        "resolved_student": {
+            "student_id": student_id or None,
+            "student_name": student_name or None,
+            "student_type": resolved.get("student_type"),
+            "reply_text": resolved.get("reply_text"),
+            "emotion": resolved.get("emotion"),
+            "is_proactive_speaking": resolved.get("is_proactive_speaking"),
+        },
+    }
+    _log_decision_event(
+        session_id=session_id,
+        stage=stage,
+        payload=row,
+    )
 
 
 def _parse_uuid(raw: str, name: str) -> uuid.UUID:
@@ -111,10 +457,76 @@ def _parse_uuid(raw: str, name: str) -> uuid.UUID:
         raise HTTPException(status_code=400, detail=f"{name} 不是合法 UUID") from exc
 
 
-def _get_session_or_404(db: Session, raw_session_id: str) -> ClassroomSession:
+def _class_time_label(elapsed_sec: int | None) -> str | None:
+    if elapsed_sec is None:
+        return None
+    try:
+        sec = max(int(elapsed_sec), 0)
+    except (TypeError, ValueError):
+        return None
+    minutes = sec // 60
+    remain = sec % 60
+    return f"{minutes:02d}:{remain:02d}"
+
+
+def _build_question_bundle_title(
+    *,
+    question_bundle_text: str,
+    question_items: list[dict],
+    min_len: int = 18,
+    max_len: int = 30,
+) -> str:
+    raw = str(question_bundle_text or "").strip()
+    items = []
+    for item in question_items or []:
+        if not isinstance(item, dict):
+            continue
+        txt = str(item.get("text") or "").strip()
+        if txt:
+            items.append(txt)
+    if not raw and items:
+        raw = "；".join(items)
+    if not raw:
+        return "连续提问要点梳理与学生回应"
+
+    # 清洗“问题X：”等前缀，优先保留问题核心。
+    text = raw
+    text = text.replace("\n", "；")
+    text = text.replace("？", "；").replace("?", "；")
+    text = text.replace("。", "；")
+    text = text.replace("，", "，")
+    text = text.strip("；，。 ")
+    text = re.sub(r"问题\s*\d+\s*[:：]\s*", "", text)
+    parts = [p.strip("；，。 ") for p in re.split(r"[；]+", text) if p.strip("；，。 ")]
+    if not parts:
+        parts = [text]
+
+    core = "；".join(parts[:2])
+    if len(parts) > 2:
+        core = f"{core}等{len(parts)}问"
+    count = max(int(len(items) or 0), 1)
+    prefix = "提问" if count <= 1 else "连续提问"
+    title = f"{prefix}：{core}"
+
+    # 长度约束到 18~30，过长截断，过短补语义后缀。
+    if len(title) > max_len:
+        title = title[: max_len - 1].rstrip("；，。 ") + "…"
+    if len(title) < min_len:
+        suffix = "（核心问题）"
+        title = (title + suffix)[:max_len]
+    return title
+
+
+def _get_session_or_404(
+    db: Session,
+    raw_session_id: str,
+    teacher_id: str,
+) -> ClassroomSession:
     session = db.get(ClassroomSession, _parse_uuid(raw_session_id, "session_id"))
     if session is None:
         raise HTTPException(status_code=404, detail="session 不存在")
+    if session.teacher_id not in {teacher_id, _LEGACY_TEACHER_ID}:
+        raise HTTPException(status_code=403, detail="无权访问该课堂")
     return session
 
 
@@ -224,8 +636,9 @@ def _build_empty_response(
 async def post_utterance(
     body: InclassUtteranceRequest,
     db: Session = Depends(get_db),
+    teacher_id: str = Depends(get_current_teacher_id),
 ):
-    session = _get_session_or_404(db, body.session_id)
+    session = _get_session_or_404(db, body.session_id, teacher_id)
     event_ts = parse_iso_datetime(body.current_timestamp)
     role_type = _role_type_from_role(body.role)
 
@@ -236,6 +649,8 @@ async def post_utterance(
         role_label=body.role,
         content=body.content,
         event_ts=event_ts,
+        class_elapsed_sec=body.class_elapsed_sec,
+        slide_no=body.slide_no,
         called_student_id=body.called_student_id,
     )
     db.add(turn)
@@ -330,6 +745,38 @@ async def post_utterance(
         return resp
 
     # 4. 正常教师发言流程
+    filter_decision = should_send_to_supervisor(
+        text=body.content,
+        called_student_id=body.called_student_id,
+        session_students=session_students,
+    )
+    filter_payload = {
+        "request": {
+            "role": body.role,
+            "content": body.content,
+            "current_timestamp": body.current_timestamp,
+            "class_elapsed_sec": body.class_elapsed_sec,
+            "slide_no": body.slide_no,
+            "called_student_id": body.called_student_id,
+        },
+        "filter": filter_decision,
+    }
+    if not filter_decision.get("send", False):
+        db.commit()
+        _log_decision_event(
+            session_id=session.id,
+            stage="pre_supervisor_filtered",
+            payload=filter_payload,
+            note=f"skip supervisor due to {filter_decision.get('reason_code')}",
+        )
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    _log_decision_event(
+        session_id=session.id,
+        stage="pre_supervisor_passed",
+        payload=filter_payload,
+        note=f"pass supervisor via {filter_decision.get('reason_code')}",
+    )
+
     # 4.1 重置举手状态（新一轮开始）
     reset_hand_raised(session.id, db)
 
@@ -355,7 +802,7 @@ async def post_utterance(
     # 4.4 构造 supervisor payload
     payload = {
         "teacher_text": body.content,
-        "current_timestamp": body.current_timestamp,
+        "class_elapsed_sec": body.class_elapsed_sec,
         "subject": session.lesson.subject,
         "chat_history": _build_chat_history(recent_turns),
         "current_ppt": _resolve_utterance_current_ppt(
@@ -457,6 +904,7 @@ async def post_utterance(
             request=body,
             supervisor_payload=payload,
             supervisor_raw=result,
+            request_turn_id=str(turn.id),
             note="normal state, return 204 no content",
         )
         return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -483,8 +931,29 @@ async def post_utterance(
         request=body,
         supervisor_payload=payload,
         supervisor_raw=result,
+        request_turn_id=str(turn.id),
         response=resp.model_dump(),
     )
+    resolved_stage_map = {
+        "ambiguous": "ambiguous_resolved",
+        "misstatement": "misstatement_resolved",
+        "relay_answer": "relay_answer_resolved",
+        "discipline_sleep": "discipline_sleep_resolved",
+        "discipline_whisper": "discipline_whisper_resolved",
+    }
+    resolved_stage = resolved_stage_map.get(dialog_state)
+    if resolved_stage:
+        _log_resolved_interaction_event(
+            session_id=session.id,
+            stage=resolved_stage,
+            request=body,
+            request_turn_id=str(turn.id),
+            interaction_round_id=interaction_round_id,
+            dialog_state=dialog_state,
+            student_event=student_event,
+            preset_for_student_id=preset_for_id,
+            session_students=session_students,
+        )
     return resp
 
 
@@ -492,9 +961,10 @@ async def post_utterance(
 async def post_student_reply(
     body: StudentReplyRequest,
     db: Session = Depends(get_db),
+    teacher_id: str = Depends(get_current_teacher_id),
 ):
     """前端点名后实时获取被点名学生的单条回复。"""
-    session = _get_session_or_404(db, body.session_id)
+    session = _get_session_or_404(db, body.session_id, teacher_id)
 
     # 1. 获取目标学生状态
     student = get_session_student(session.id, body.student_id, db)
@@ -526,17 +996,16 @@ async def post_student_reply(
         background["slides"] = [ppt_slide]
 
     # 对话历史拆分为 teacher / student utterances
+    class_ts = _class_time_label(body.class_elapsed_sec) or body.current_timestamp or ""
     teacher_utterances = []
     student_utterances = []
     for msg in chat_history:
         if msg.get("role") == "teacher":
-            teacher_utterances.append(
-                {"ts": body.current_timestamp or "", "text": msg.get("content", "")}
-            )
+            teacher_utterances.append({"ts": class_ts, "text": msg.get("content", "")})
         elif msg.get("role") == "student":
             student_utterances.append(
                 {
-                    "ts": body.current_timestamp or "",
+                    "ts": class_ts,
                     "text": msg.get("content", ""),
                     "student_id": "",
                 }
@@ -545,6 +1014,17 @@ async def post_student_reply(
         background["teacher_utterances_on_slide"] = teacher_utterances
     if student_utterances:
         background["student_utterances_on_slide"] = student_utterances
+    bundle_text = str(body.question_bundle_text or "").strip()
+    bundle_items = body.question_items or []
+    question_count = int(body.question_count or 0)
+    if question_count <= 0:
+        question_count = max(len(bundle_items), 1)
+    if bundle_text or bundle_items:
+        background["question_bundle"] = {
+            "text": bundle_text,
+            "count": question_count,
+            "items": bundle_items,
+        }
 
     # 4. 调用 AI 模块生成单条回复
     was_hand_raised = bool(student.is_hand_raised)
@@ -565,6 +1045,44 @@ async def post_student_reply(
     reset_hand_raised(session.id, db)
     db.commit()
 
+    question_count = int(body.question_count or 0)
+    question_items = body.question_items or []
+    if question_count <= 0:
+        question_count = max(len(question_items), 1)
+    question_bundle_text = str(body.question_bundle_text or "").strip()
+    bundle_title = _build_question_bundle_title(
+        question_bundle_text=question_bundle_text,
+        question_items=question_items,
+    )
+    _log_decision_event(
+        session_id=session.id,
+        stage="questioning_bundle_resolved",
+        payload={
+            "request": {
+                "student_id": body.student_id,
+                "current_timestamp": body.current_timestamp,
+                "class_elapsed_sec": body.class_elapsed_sec,
+                "slide_no": body.slide_no,
+            },
+            "bundle": {
+                "bundle_title": bundle_title,
+                "question_count": question_count,
+                "question_bundle_text": question_bundle_text,
+                "question_items": question_items,
+            },
+            "resolved_student_reply": {
+                "student_id": student.student_id,
+                "student_name": student.student_name,
+                "student_type": student.student_type,
+                "reply_text": ai_result.get("reply_text", "（无回复）"),
+                "emotion": ai_result.get("emotion", "idle"),
+                "is_proactive_speaking": ai_result.get(
+                    "is_proactive_speaking", was_hand_raised
+                ),
+            },
+        },
+    )
+
     return StudentReplyResponse(
         student_id=student.student_id,
         student_type=student.student_type,
@@ -579,9 +1097,10 @@ def get_student_state(
     student_id: str,
     session_id: str | None = None,
     db: Session = Depends(get_db),
+    teacher_id: str = Depends(get_current_teacher_id),
 ):
     if session_id:
-        session = _get_session_or_404(db, session_id)
+        session = _get_session_or_404(db, session_id, teacher_id)
         student = get_session_student(session.id, student_id, db)
         if student is None:
             raise HTTPException(status_code=404, detail="student 不存在")
@@ -602,8 +1121,12 @@ def get_student_state(
 
 
 @router.get("/student-states/{session_id}")
-def get_all_student_states(session_id: str, db: Session = Depends(get_db)):
-    session = _get_session_or_404(db, session_id)
+def get_all_student_states(
+    session_id: str,
+    db: Session = Depends(get_db),
+    teacher_id: str = Depends(get_current_teacher_id),
+):
+    session = _get_session_or_404(db, session_id, teacher_id)
     students = get_session_students(session.id, db)
     return [
         {
@@ -622,8 +1145,9 @@ def get_all_student_states(session_id: str, db: Session = Depends(get_db)):
 async def post_segment(
     body: InclassSegmentRequest,
     db: Session = Depends(get_db),
+    teacher_id: str = Depends(get_current_teacher_id),
 ):
-    session = _get_session_or_404(db, body.session_id)
+    session = _get_session_or_404(db, body.session_id, teacher_id)
     start_ts = parse_iso_datetime(body.start_ts)
     end_ts = parse_iso_datetime(body.end_ts)
     if end_ts < start_ts:
@@ -643,8 +1167,14 @@ async def post_segment(
         "teacher_utterances": [item.model_dump() for item in body.teacher_utterances],
         "student_utterances": [item.model_dump() for item in body.student_utterances],
     }
+    segment_payload = {
+        **ai_payload,
+        "start_elapsed_sec": body.start_elapsed_sec,
+        "end_elapsed_sec": body.end_elapsed_sec,
+    }
     if ppt_context:
         ai_payload["ppt_context"] = ppt_context
+        segment_payload["ppt_context"] = ppt_context
 
     row = (
         db.query(SessionSegment)
@@ -661,14 +1191,14 @@ async def post_segment(
             start_ts=start_ts,
             end_ts=end_ts,
             slide_no=body.slide_no,
-            segment_payload=ai_payload,
+            segment_payload=segment_payload,
         )
         db.add(row)
     else:
         row.start_ts = start_ts
         row.end_ts = end_ts
         row.slide_no = body.slide_no
-        row.segment_payload = ai_payload
+        row.segment_payload = segment_payload
 
     ai_client = AIClient()
     try:

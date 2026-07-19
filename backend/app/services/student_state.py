@@ -12,7 +12,7 @@ from app.models.session_student import SessionStudent
 # 固定学生名单（与前端 ClassroomView.vue 对齐）
 STUDENT_ROSTER = [
     {"student_id": "student_xm", "student_name": "小明"},
-    {"student_id": "student_xw", "student_name": "小闻"},
+    {"student_id": "student_xw", "student_name": "小红"},
     {"student_id": "student_xw2", "student_name": "小王"},
     {"student_id": "student_xl", "student_name": "小乐"},
 ]
@@ -32,16 +32,36 @@ def initialize_session_students(
     class_level: str,
     db: Session | None = None,
 ) -> List[SessionStudent]:
-    """根据班级类型随机分配学生类型，并写入数据库。"""
+    """根据班级类型随机分配学生类型，并写入数据库。
+
+    约束：
+    - 每节课至少 1 个杠精（gangjing）与 1 个学困（xuekun）
+    - 其余学生按班级权重分配
+    """
     weights_map = CLASS_LEVEL_WEIGHTS.get(class_level)
     if weights_map is None:
         # 默认平行班
         weights_map = CLASS_LEVEL_WEIGHTS["平行班"]
 
-    weights = [weights_map[t] for t in STUDENT_TYPES]
     rng = random.Random(str(session_id))
+    roster_size = len(STUDENT_ROSTER)
+    assigned_types: list[str] = ["" for _ in range(roster_size)]
 
-    assigned_types = rng.choices(STUDENT_TYPES, weights=weights, k=len(STUDENT_ROSTER))
+    # 先保证至少 1 名杠精 + 1 名学困
+    guaranteed_indices = list(range(roster_size))
+    gangjing_idx = rng.choice(guaranteed_indices)
+    assigned_types[gangjing_idx] = "gangjing"
+    guaranteed_indices.remove(gangjing_idx)
+    xuekun_idx = rng.choice(guaranteed_indices)
+    assigned_types[xuekun_idx] = "xuekun"
+    guaranteed_indices.remove(xuekun_idx)
+
+    # 剩余名额按班级权重继续采样
+    weights = [weights_map[t] for t in STUDENT_TYPES]
+    if guaranteed_indices:
+        sampled = rng.choices(STUDENT_TYPES, weights=weights, k=len(guaranteed_indices))
+        for idx, stype in zip(guaranteed_indices, sampled):
+            assigned_types[idx] = stype
 
     def _create() -> List[SessionStudent]:
         with session_scope() as s:
@@ -224,4 +244,7 @@ def build_called_student_digest(
         "student_id": student.student_id,
         "student_name": student.student_name,
         "student_type": student.student_type,
+        "is_hand_raised": bool(student.is_hand_raised),
+        "is_sleeping": bool(student.is_sleeping),
+        "is_whispering": bool(student.is_whispering),
     }

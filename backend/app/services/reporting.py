@@ -1,14 +1,29 @@
 from __future__ import annotations
 
+import json
 import math
 import re
 from collections import Counter, defaultdict
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from app.models.lesson import ClassroomSession, SessionSegment, SessionTurn
 
-FILLER_WORDS = ["然后", "就是", "对不对", "呃"]
+FILLER_LEXICON = [
+    "然后",
+    "就是",
+    "对不对",
+    "呃",
+    "嗯",
+    "那个",
+    "这个",
+    "其实",
+    "就是说",
+    "那么",
+    "好吧",
+    "大家看",
+]
 QUESTION_TYPE_COLORS = {
     "封闭式": "#E5E7EB",
     "引导式": "#BFDBFE",
@@ -20,6 +35,17 @@ TIME_COLORS = {
     "互动问答": "#10B981",
     "总结巩固": "#F59E0B",
 }
+INTERACTION_STATES = {
+    "questioning",
+    "ambiguous",
+    "misstatement",
+    "relay_answer",
+    "discipline_whisper",
+    "discipline_sleep",
+}
+_DECISION_LOG_PATH = (
+    Path(__file__).resolve().parents[2] / "logs" / "inclass_decisions.jsonl"
+)
 
 
 def build_ai_report_fallback(
@@ -76,8 +102,19 @@ def build_report_response(
 ) -> dict[str, Any]:
     started_at = session.started_at or session.created_at
     ended_at = session.ended_at or started_at
-    duration_min = _duration_minutes(started_at, ended_at)
-    hard_stats = _build_hard_stats(turns, started_at, ended_at)
+    has_class_data = bool(turns or segments)
+    elapsed_duration_min = _duration_minutes_from_elapsed(segments)
+    if not has_class_data:
+        duration_min = 0
+    else:
+        duration_min = elapsed_duration_min or _duration_minutes(started_at, ended_at)
+    hard_stats = _build_hard_stats(turns, started_at, ended_at, duration_min=duration_min)
+    target_duration_min = _extract_target_duration_min(lesson_json)
+    duration_overtime = (
+        bool(target_duration_min and duration_min > target_duration_min)
+        if has_class_data
+        else False
+    )
     question_types = _build_question_types(turns)
     time_distribution = _build_time_distribution(segments, duration_min)
     dimensions, scores = _build_dimensions(ai_report)
@@ -90,7 +127,9 @@ def build_report_response(
         ai_report=ai_report,
         scores=scores,
     )
-    highlights = _build_highlight_events(segments, turns, started_at)
+    highlights = _build_highlight_events(
+        segments, turns, started_at, session_id=str(session.id)
+    )
     lesson_topic = (
         ai_report.get("lesson_topic")
         or lesson_json.get("basic_info", {}).get("lesson_topic")
@@ -106,6 +145,8 @@ def build_report_response(
         x for x in [session.lesson.grade, session.lesson.class_level] if x
     )
     suggestions = _format_suggestions(ai_report)
+    if not has_class_data:
+        suggestions = "本次课堂未开始授课，暂无可分析的讲课与互动数据。请开启“开始授课”后再生成报告。"
 
     return {
         "session_id": str(session.id),
@@ -114,6 +155,8 @@ def build_report_response(
         "class_info": class_info,
         "created_at": started_at.strftime("%Y-%m-%d %H:%M"),
         "duration_min": duration_min,
+        "target_duration_min": target_duration_min,
+        "duration_overtime": duration_overtime,
         "overall_level": overall_level,
         "overall_desc": overall_desc,
         "dimensions": dimensions,
@@ -138,15 +181,36 @@ def _duration_minutes(started_at: datetime, ended_at: datetime) -> int:
     return max(1, int(round(seconds / 60)))
 
 
+def _extract_target_duration_min(lesson_json: dict[str, Any]) -> int | None:
+    prefs = lesson_json.get("teaching_preferences") or {}
+    candidates = [
+        prefs.get("duration"),
+        lesson_json.get("duration"),
+    ]
+    for raw in candidates:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        matched = re.search(r"(\d+(?:\.\d+)?)", text)
+        if not matched:
+            continue
+        minutes = float(matched.group(1))
+        if minutes > 0:
+            return int(round(minutes))
+    return None
+
+
 def _build_hard_stats(
     turns: list[SessionTurn],
     started_at: datetime,
     ended_at: datetime,
+    duration_min: int | None = None,
 ) -> dict[str, Any]:
     teacher_turns = [turn for turn in turns if turn.role_type == "teacher"]
     student_turns = [turn for turn in turns if turn.role_type == "student"]
     total_words = sum(len((turn.content or "").strip()) for turn in teacher_turns)
-    duration_min = _duration_minutes(started_at, ended_at)
+    if duration_min is None:
+        duration_min = _duration_minutes(started_at, ended_at)
     avg_speed = int(round(total_words / duration_min)) if duration_min else 0
 
     wait_samples = []
@@ -166,10 +230,8 @@ def _build_hard_stats(
         wait_samples.append((next_student.event_ts - turn.event_ts).total_seconds())
     avg_wait = round(sum(wait_samples) / len(wait_samples), 1) if wait_samples else 0
 
-    filler_counts = []
     teacher_blob = "\n".join(turn.content for turn in teacher_turns)
-    for word in FILLER_WORDS:
-        filler_counts.append({"word": word, "count": teacher_blob.count(word)})
+    filler_counts = _top_filler_words(teacher_blob)
 
     return {
         "total_duration_min": duration_min,
@@ -179,6 +241,48 @@ def _build_hard_stats(
         "avg_wait_time_sec": avg_wait,
         "filler_words": filler_counts,
     }
+
+
+def _top_filler_words(text: str, top_n: int = 4) -> list[dict[str, Any]]:
+    blob = str(text or "")
+    rows = []
+    palette = ["#2563EB", "#10B981", "#F59E0B", "#A855F7"]
+    for word in FILLER_LEXICON:
+        count = len(re.findall(re.escape(word), blob))
+        rows.append({"word": word, "count": count})
+    rows.sort(key=lambda x: (-x["count"], -len(x["word"]), x["word"]))
+    top = rows[:top_n]
+    total = sum(item["count"] for item in top)
+    out = []
+    for idx, item in enumerate(top):
+        pct = (item["count"] / total * 100) if total > 0 else 0
+        out.append(
+            {
+                **item,
+                "pct": round(pct, 1),
+                "color": palette[idx % len(palette)],
+            }
+        )
+    return out
+
+
+def _duration_minutes_from_elapsed(segments: list[SessionSegment]) -> int | None:
+    max_elapsed_sec = 0
+    for seg in segments:
+        payload = seg.segment_payload or {}
+        raw = payload.get("end_elapsed_sec")
+        if raw is None:
+            # backward compatibility for old historical rows
+            raw = payload.get("timer_elapsed_sec")
+        try:
+            sec = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if sec > max_elapsed_sec:
+            max_elapsed_sec = sec
+    if max_elapsed_sec <= 0:
+        return None
+    return max(1, int(round(max_elapsed_sec / 60)))
 
 
 def _build_question_types(turns: list[SessionTurn]) -> list[dict[str, Any]]:
@@ -215,7 +319,7 @@ def _build_time_distribution(
     buckets: dict[str, float] = defaultdict(float)
     ordered = sorted(segments, key=lambda item: item.start_ts)
     for idx, segment in enumerate(ordered):
-        seg_minutes = max((segment.end_ts - segment.start_ts).total_seconds() / 60, 0.5)
+        seg_minutes = _segment_minutes(segment)
         payload = segment.segment_payload or {}
         student_utterances = payload.get("student_utterances") or []
         if idx == 0:
@@ -321,14 +425,24 @@ def _build_highlight_events(
     segments: list[SessionSegment],
     turns: list[SessionTurn],
     started_at: datetime,
+    session_id: str,
 ) -> list[dict[str, Any]]:
     events = []
+    # 优先采用 supervisor 决策日志中的真实判定，缺失时再回退文本推断。
+    interaction_events = _build_interaction_events_from_decision_logs(
+        session_id=session_id,
+        turns=turns,
+        started_at=started_at,
+    )
+    if not interaction_events:
+        interaction_events = _build_interaction_events(turns, started_at)
+    events.extend(interaction_events)
     ordered = sorted(segments, key=lambda item: item.start_ts)
     for segment in ordered:
         eval_payload = segment.eval_payload or {}
         strengths = eval_payload.get("strengths") or []
         issues = eval_payload.get("issues") or []
-        time_label = _relative_time(started_at, segment.start_ts)
+        time_label = _segment_time_label(segment, started_at)
         teacher_turns, student_turns = _collect_context_turns(
             segment_payload=segment.segment_payload or {},
             turns=turns,
@@ -355,9 +469,448 @@ def _build_highlight_events(
                     "student_turns": student_turns,
                 }
             )
-        if len(events) >= 4:
+    # 保序去重：优先保留互动类节点，再补充评估节点
+    dedup: list[dict[str, Any]] = []
+    seen = set()
+    for ev in events:
+        key = (ev.get("time"), ev.get("text"))
+        if key in seen:
+            continue
+        seen.add(key)
+        dedup.append(ev)
+    dedup.sort(key=lambda item: _time_label_to_seconds(str(item.get("time") or "")))
+    return dedup
+
+
+def _build_interaction_events(
+    turns: list[SessionTurn],
+    started_at: datetime,
+) -> list[dict[str, Any]]:
+    ordered = sorted(turns, key=lambda item: (item.event_ts, item.created_at))
+    out: list[dict[str, Any]] = []
+    for idx, turn in enumerate(ordered):
+        if turn.role_type != "teacher":
+            continue
+        text = str(turn.content or "").strip()
+        if not text:
+            continue
+        state = _infer_interaction_state_from_text(text)
+        if not state:
+            continue
+        out.append(
+            {
+                "time": _relative_time(started_at, turn.event_ts),
+                "type": "warning"
+                if state
+                in {"ambiguous", "misstatement", "discipline_whisper", "discipline_sleep"}
+                else "good",
+                "text": _interaction_title(state, text),
+                "teacher_turns": [text[:120]] if state == "questioning" else [f"老师：{text[:120]}"],
+                "student_turns": _nearest_student_turns(ordered, idx),
+            }
+        )
+    return out
+
+
+def _build_interaction_events_from_decision_logs(
+    *,
+    session_id: str,
+    turns: list[SessionTurn],
+    started_at: datetime,
+) -> list[dict[str, Any]]:
+    rows = _load_session_decision_rows(
+        session_id,
+        stages={
+            "questioning_bundle_resolved",
+            "ambiguous_resolved",
+            "misstatement_resolved",
+            "relay_answer_resolved",
+            "discipline_sleep_resolved",
+            "discipline_whisper_resolved",
+            "supervisor_decision",
+            "supervisor_decision_normal_204",
+        },
+    )
+    if not rows:
+        return []
+    ordered_turns = sorted(turns, key=lambda item: (item.event_ts, item.created_at))
+    out: list[dict[str, Any]] = []
+
+    # 1) questioning 由 questioning_bundle_resolved 生成（匿名学生）
+    for row in rows:
+        if str(row.get("stage") or "") != "questioning_bundle_resolved":
+            continue
+        request = row.get("request") or {}
+        bundle = row.get("bundle") or {}
+        resolved = row.get("resolved_student_reply") or {}
+        question_count = _to_int(bundle.get("question_count")) or 1
+        question_items = bundle.get("question_items") or []
+        merged = str(bundle.get("question_bundle_text") or "").strip()
+        teacher_turns: list[str] = [merged[:120]] if merged else []
+        if not teacher_turns and isinstance(question_items, list):
+            for item in question_items[:1]:
+                if not isinstance(item, dict):
+                    continue
+                text = str(item.get("text") or "").strip()
+                if text:
+                    teacher_turns = [text[:120]]
+                    break
+        reply_text = str(resolved.get("reply_text") or "").strip()
+        if not teacher_turns or not reply_text:
+            continue
+        node_text = str(bundle.get("bundle_title") or "").strip()
+        if not node_text:
+            node_text = merged or (
+                f"问题共{question_count}问"
+                if question_count > 1
+                else "课堂提问"
+            )
+        label = str(bundle.get("bundle_title") or "").strip()
+        if not label:
+            label = node_text
+        if not label.startswith("提问：") and not label.startswith("连续提问："):
+            label = f"提问：{label}"
+        out.append(
+            {
+                "time": _decision_time_label(request, started_at),
+                "type": "good",
+                "text": label,
+                "teacher_turns": teacher_turns,
+                "student_turns": [f"学生：{reply_text[:120]}"],
+            }
+        )
+
+    # 2) 其他五类交互优先从 *_resolved 生成（避免 turn 窗口串行）
+    resolved_stage_to_state = {
+        "ambiguous_resolved": "ambiguous",
+        "misstatement_resolved": "misstatement",
+        "relay_answer_resolved": "relay_answer",
+        "discipline_sleep_resolved": "discipline_sleep",
+        "discipline_whisper_resolved": "discipline_whisper",
+    }
+    has_resolved_interactions = False
+    for row in rows:
+        stage = str(row.get("stage") or "").strip()
+        state = resolved_stage_to_state.get(stage)
+        if not state:
+            continue
+        request = row.get("request") or {}
+        resolved_student = row.get("resolved_student") or {}
+        teacher_text = str(request.get("content") or "").strip()
+        if not teacher_text:
+            continue
+        reply_text = str(resolved_student.get("reply_text") or "").strip()
+        student_name = str(resolved_student.get("student_name") or "").strip()
+        if state in {"relay_answer", "discipline_sleep", "discipline_whisper"} and student_name:
+            student_prefix = student_name
+        else:
+            student_prefix = "学生"
+        student_turns = [f"{student_prefix}：{reply_text[:120]}"] if reply_text else []
+        out.append(
+            {
+                "time": _decision_time_label(request, started_at),
+                "type": "warning" if state in {"ambiguous", "misstatement"} else "good",
+                "text": _interaction_title(state, teacher_text, truncate=False),
+                "teacher_turns": [f"老师：{teacher_text}"],
+                "student_turns": student_turns,
+            }
+        )
+        has_resolved_interactions = True
+
+    # 3) 兼容历史数据：若无 *_resolved，再退回旧 supervisor_decision 拼接逻辑
+    if has_resolved_interactions:
+        out.sort(key=lambda item: _time_label_to_seconds(str(item.get("time") or "")))
+        return out
+
+    anchors: list[dict[str, Any]] = []
+    last_teacher_idx = -1
+    for row in rows:
+        stage = str(row.get("stage") or "").strip()
+        if stage not in {"supervisor_decision", "supervisor_decision_normal_204"}:
+            continue
+        supervisor_raw = row.get("supervisor_raw") or {}
+        response = row.get("response") or {}
+        request = row.get("request") or {}
+        state = str(
+            (response.get("dialog_state") if isinstance(response, dict) else "")
+            or (supervisor_raw.get("dialog_state") if isinstance(supervisor_raw, dict) else "")
+            or ""
+        ).strip()
+        if state not in {
+            "ambiguous",
+            "misstatement",
+            "relay_answer",
+            "discipline_whisper",
+            "discipline_sleep",
+        }:
+            continue
+        text = str(request.get("content") or "").strip()
+        if not text and isinstance(supervisor_raw, dict):
+            text = str(supervisor_raw.get("teacher_text") or "").strip()
+        if not text:
+            continue
+        request_turn_id = str(row.get("request_turn_id") or "").strip()
+        teacher_idx = _find_teacher_turn_index_by_turn_id(
+            ordered_turns,
+            request_turn_id=request_turn_id,
+        )
+        if teacher_idx is None:
+            teacher_idx = _find_teacher_turn_index(
+                ordered_turns,
+                teacher_text=text,
+                start_after_idx=last_teacher_idx,
+            )
+        if isinstance(teacher_idx, int):
+            last_teacher_idx = teacher_idx
+        anchors.append(
+            {
+                "state": state,
+                "text": text,
+                "request": request,
+                "teacher_idx": teacher_idx,
+            }
+        )
+
+    for idx, anchor in enumerate(anchors):
+        state = str(anchor.get("state") or "")
+        text = str(anchor.get("text") or "")
+        request = anchor.get("request") or {}
+        teacher_idx = anchor.get("teacher_idx")
+        next_teacher_idx: int | None = None
+        for j in range(idx + 1, len(anchors)):
+            nxt = anchors[j].get("teacher_idx")
+            if isinstance(nxt, int) and isinstance(teacher_idx, int) and nxt > teacher_idx:
+                next_teacher_idx = nxt
+                break
+
+        teacher_lines: list[str] = [f"老师：{text[:120]}"]
+        student_lines: list[str] = []
+        if isinstance(teacher_idx, int):
+            teacher_lines, student_lines = _collect_dialogue_block_from_anchor(
+                turns=ordered_turns,
+                teacher_idx=teacher_idx,
+                state=state,
+                next_teacher_idx=next_teacher_idx,
+            )
+
+        out.append(
+            {
+                "time": _decision_time_label(request, started_at),
+                "type": "warning"
+                if state
+                in {"ambiguous", "misstatement", "discipline_whisper", "discipline_sleep"}
+                else "good",
+                "text": _interaction_title(state, text),
+                "teacher_turns": teacher_lines,
+                "student_turns": student_lines,
+            }
+        )
+    out.sort(key=lambda item: _time_label_to_seconds(str(item.get("time") or "")))
+    return out
+
+
+def _interaction_title(state: str, text: str, *, truncate: bool = True) -> str:
+    raw = str(text or "").strip()
+    body = raw[:56] if truncate else raw
+    mapping = {
+        "questioning": "提问",
+        "relay_answer": "追问",
+        "ambiguous": "知识点讲述模糊",
+        "misstatement": "知识点讲述错误",
+        "discipline_whisper": "课堂纪律提醒",
+        "discipline_sleep": "课堂纪律提醒",
+    }
+    prefix = mapping.get(str(state or "").strip(), "课堂互动")
+    return f"{prefix}：{body}" if body else prefix
+
+
+def _time_label_to_seconds(label: str) -> int:
+    text = str(label or "").strip()
+    m = re.match(r"^(\d{1,2}):(\d{2})$", text)
+    if not m:
+        return 0
+    return int(m.group(1)) * 60 + int(m.group(2))
+
+
+def _find_teacher_turn_index_by_turn_id(
+    turns: list[SessionTurn],
+    *,
+    request_turn_id: str,
+) -> int | None:
+    target = str(request_turn_id or "").strip()
+    if not target:
+        return None
+    for idx, turn in enumerate(turns):
+        if turn.role_type != "teacher":
+            continue
+        if str(turn.id) == target:
+            return idx
+    return None
+
+
+def _load_session_decision_rows(
+    session_id: str,
+    *,
+    stages: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    if not _DECISION_LOG_PATH.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        with _DECISION_LOG_PATH.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if str(row.get("session_id") or "") != str(session_id):
+                    continue
+                stage = str(row.get("stage") or "").strip()
+                if stages is not None and stage not in stages:
+                    continue
+                rows.append(row)
+    except OSError:
+        return []
+    rows.sort(key=lambda item: str(item.get("ts") or ""))
+    return rows
+
+
+def _decision_time_label(request: dict[str, Any], started_at: datetime) -> str:
+    elapsed = _to_int(request.get("class_elapsed_sec"))
+    if elapsed is not None and elapsed >= 0:
+        return _relative_time_from_elapsed(elapsed)
+    raw_ts = str(request.get("current_timestamp") or "").strip()
+    if raw_ts:
+        dt = _try_parse_iso_datetime(raw_ts)
+        if dt is not None:
+            return _relative_time(started_at, dt)
+    return "00:00"
+
+
+def _try_parse_iso_datetime(raw: str) -> datetime | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _find_teacher_turn_index(
+    turns: list[SessionTurn],
+    *,
+    teacher_text: str,
+    start_after_idx: int = -1,
+) -> int | None:
+    target = str(teacher_text or "").strip()
+    if not target:
+        return None
+    # 优先在“上一锚点之后”按同文本匹配，避免重复文本错配到旧轮次。
+    for idx in range(max(start_after_idx + 1, 0), len(turns)):
+        turn = turns[idx]
+        if turn.role_type != "teacher":
+            continue
+        text = str(turn.content or "").strip()
+        if text == target:
+            return idx
+
+    # 若后半段找不到，再全局精确匹配一次（处理极端乱序情况）。
+    for idx, turn in enumerate(turns):
+        if turn.role_type != "teacher":
+            continue
+        text = str(turn.content or "").strip()
+        if text == target:
+            return idx
+    return None
+
+
+def _collect_dialogue_block_from_anchor(
+    *,
+    turns: list[SessionTurn],
+    teacher_idx: int,
+    state: str,
+    next_teacher_idx: int | None = None,
+) -> tuple[list[str], list[str]]:
+    teacher_turns: list[str] = []
+    student_turns: list[str] = []
+    if teacher_idx < 0 or teacher_idx >= len(turns):
+        return teacher_turns, student_turns
+
+    teacher_limit = 3 if state in {"questioning", "relay_answer"} else 2
+    student_limit = 2
+
+    # 教师问题块：从锚点起，连续收集教师句，直到遇到学生句或下一交互锚点
+    i = teacher_idx
+    while i < len(turns) and len(teacher_turns) < teacher_limit:
+        if next_teacher_idx is not None and i >= next_teacher_idx:
             break
-    return events[:4]
+        t = turns[i]
+        if t.role_type == "teacher":
+            text = str(t.content or "").strip()
+            if text:
+                teacher_turns.append(f"老师：{text[:120]}")
+            i += 1
+            continue
+        break
+
+    # 学生回答块：紧随其后连续学生句，遇到教师句或下一交互锚点即停止
+    while i < len(turns) and len(student_turns) < student_limit:
+        if next_teacher_idx is not None and i >= next_teacher_idx:
+            break
+        t = turns[i]
+        if t.role_type == "student":
+            text = str(t.content or "").strip()
+            if text:
+                student_turns.append(f"学生：{text[:120]}")
+            i += 1
+            continue
+        break
+
+    return teacher_turns, student_turns
+
+
+def _infer_interaction_state_from_text(text: str) -> str | None:
+    t = str(text or "")
+    if any(k in t for k in ("别说话", "安静", "不要讲话")):
+        return "discipline_whisper"
+    if any(k in t for k in ("别睡", "打瞌睡", "抬头听讲", "别打瞌睡")):
+        return "discipline_sleep"
+    if any(k in t for k in ("不必深究", "先往下听", "大概知道", "先记住这个结论")):
+        return "ambiguous"
+    if any(
+        k in t
+        for k in (
+            "任意三角形两边就能直接套勾股",
+            "忠比孝更重要",
+            "反对孝道",
+        )
+    ):
+        return "misstatement"
+    if any(k in t for k in ("补充一下", "你来补充", "你来指正", "纠错")):
+        return "relay_answer"
+    if _looks_like_question(t):
+        return "questioning"
+    return None
+
+
+def _nearest_student_turns(turns: list[SessionTurn], teacher_idx: int) -> list[str]:
+    out: list[str] = []
+    for turn in turns[teacher_idx + 1 :]:
+        if turn.role_type != "student":
+            continue
+        text = str(turn.content or "").strip()
+        if not text:
+            continue
+        out.append(f"学生：{text[:120]}")
+        if len(out) >= 2:
+            break
+    return out
 
 
 def _collect_context_turns(
@@ -505,3 +1058,38 @@ def _relative_time(started_at: datetime, current: datetime) -> str:
     minutes = seconds // 60
     remain = seconds % 60
     return f"{minutes:02d}:{remain:02d}"
+
+
+def _segment_minutes(segment: SessionSegment) -> float:
+    payload = segment.segment_payload or {}
+    start_elapsed = _to_int(payload.get("start_elapsed_sec"))
+    end_elapsed = _to_int(payload.get("end_elapsed_sec"))
+    if (
+        start_elapsed is not None
+        and end_elapsed is not None
+        and end_elapsed >= start_elapsed
+    ):
+        return max((end_elapsed - start_elapsed) / 60, 0.5)
+    return max((segment.end_ts - segment.start_ts).total_seconds() / 60, 0.5)
+
+
+def _segment_time_label(segment: SessionSegment, started_at: datetime) -> str:
+    payload = segment.segment_payload or {}
+    start_elapsed = _to_int(payload.get("start_elapsed_sec"))
+    if start_elapsed is not None and start_elapsed >= 0:
+        return _relative_time_from_elapsed(start_elapsed)
+    return _relative_time(started_at, segment.start_ts)
+
+
+def _relative_time_from_elapsed(elapsed_sec: int) -> str:
+    seconds = max(int(elapsed_sec), 0)
+    minutes = seconds // 60
+    remain = seconds % 60
+    return f"{minutes:02d}:{remain:02d}"
+
+
+def _to_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

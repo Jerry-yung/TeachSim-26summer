@@ -2,11 +2,24 @@ from __future__ import annotations
 
 import json
 import uuid
+from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Query,
+    UploadFile,
+)
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
+from app.core.auth import get_current_teacher_id
 from app.db.session import get_db
 from app.models.lesson import ClassroomSession, Lesson, LessonFile
 from app.schemas.lesson import InitLessonResponse, LessonStatusResponse
@@ -17,9 +30,11 @@ from app.services.lesson_processing import (
 )
 from app.services.student_state import initialize_session_students
 from app.services.lesson_runtime import build_min_lesson_payload, guess_subject_icon
-from app.services.storage import save_lesson_file
+from app.services.ppt_preview import convert_office_to_pdf
+from app.services.storage import resolve_upload_path, save_lesson_file
 
 router = APIRouter(tags=["lesson"])
+_LEGACY_TEACHER_ID = "legacy_teacher"
 
 CLASS_LEVELS = {"重点班", "普通班", "平行班"}
 ATMOSPHERES = {"活跃", "沉闷", "活跃互动型", "沉浸讲解型", "严谨讨论型", "练习主导型"}
@@ -44,6 +59,61 @@ def _parse_uuid(raw: str, name: str) -> uuid.UUID:
         raise HTTPException(status_code=400, detail=f"{name} 不是合法 UUID") from exc
 
 
+def _find_preview_source_file(lesson: Lesson) -> LessonFile | None:
+    files = sorted(lesson.files or [], key=lambda f: f.created_at, reverse=True)
+    for f in files:
+        ext = (f.original_filename or "").lower()
+        if ext.endswith(".pdf") or ext.endswith(".ppt") or ext.endswith(".pptx"):
+            return f
+    return None
+
+
+def _ppt_page_count(lesson: Lesson) -> int:
+    payload = lesson.ppt_payload or {}
+    deck = payload.get("deck_info") if isinstance(payload, dict) else {}
+    if isinstance(deck, dict):
+        for key in ("slide_count", "total_slides", "page_count"):
+            raw = deck.get(key)
+            try:
+                n = int(raw)
+                if n > 0:
+                    return n
+            except (TypeError, ValueError):
+                continue
+    slides = payload.get("slides") if isinstance(payload, dict) else None
+    if isinstance(slides, list) and slides:
+        return len(slides)
+    source = _find_preview_source_file(lesson)
+    if source is not None:
+        try:
+            src_abs = resolve_upload_path(source.storage_path)
+            pdf_abs = (
+                src_abs
+                if src_abs.suffix.lower() == ".pdf"
+                else src_abs.with_suffix(".pdf")
+            )
+            if pdf_abs.exists():
+                from pypdf import PdfReader
+
+                reader = PdfReader(str(pdf_abs))
+                if len(reader.pages) > 0:
+                    return len(reader.pages)
+        except Exception:
+            pass
+    return 1
+
+
+def _prepare_preview_pdf_background(storage_path: str) -> None:
+    try:
+        src_abs = resolve_upload_path(storage_path)
+    except ValueError:
+        return
+    if not src_abs.exists():
+        return
+    # 课前预转换：课堂仅做读取，不在预览接口现场转换
+    convert_office_to_pdf(src_abs)
+
+
 @router.post("/init_lesson", response_model=InitLessonResponse)
 async def init_lesson(
     background_tasks: BackgroundTasks,
@@ -59,6 +129,7 @@ async def init_lesson(
     teaching_preferences_json: Optional[str] = Form(None),
     frontend_session_id: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
+    teacher_id: str = Depends(get_current_teacher_id),
 ) -> InitLessonResponse:
     if class_level not in CLASS_LEVELS:
         raise HTTPException(
@@ -110,6 +181,7 @@ async def init_lesson(
 
     db.add(lesson)
     db.flush()
+    uploaded_storage_path: str | None = None
 
     if file is not None and (file.filename or "").strip():
         try:
@@ -126,9 +198,11 @@ async def init_lesson(
                 storage_path=storage_path,
             )
         )
+        uploaded_storage_path = storage_path
 
     session = ClassroomSession(
         lesson_id=lesson.id,
+        teacher_id=teacher_id,
         status="pending" if lesson.embedding_status != "done" else "ready",
         frontend_session_id=frontend_session_id.strip()
         if frontend_session_id and frontend_session_id.strip()
@@ -140,6 +214,14 @@ async def init_lesson(
     # 初始化学生状态库
     initialize_session_students(session.id, class_level, db=db)
     db.commit()
+
+    if uploaded_storage_path:
+        suffix = Path(uploaded_storage_path).suffix.lower()
+        if suffix in {".ppt", ".pptx"}:
+            background_tasks.add_task(
+                _prepare_preview_pdf_background,
+                uploaded_storage_path,
+            )
 
     if file is not None and lesson.embedding_status != "done":
         background_tasks.add_task(analyze_lesson_in_background, str(lesson.id))
@@ -198,18 +280,115 @@ def get_lesson_status(
     )
 
 
+@router.get("/lesson/{lesson_id}/ppt-preview")
+def get_lesson_ppt_preview(
+    lesson_id: str,
+    db: Session = Depends(get_db),
+    teacher_id: str = Depends(get_current_teacher_id),
+):
+    lesson = db.get(Lesson, _parse_uuid(lesson_id, "lesson_id"))
+    if lesson is None:
+        raise HTTPException(status_code=404, detail="lesson 不存在")
+
+    has_access = any(
+        s.teacher_id in {teacher_id, _LEGACY_TEACHER_ID}
+        for s in (lesson.sessions or [])
+    )
+    if not has_access:
+        raise HTTPException(status_code=403, detail="无权访问该课堂")
+
+    source = _find_preview_source_file(lesson)
+    if source is None:
+        return {
+            "ready": False,
+            "message": "未找到可预览课件文件",
+            "preview_path": None,
+            "page_count": _ppt_page_count(lesson),
+        }
+
+    src_abs = resolve_upload_path(source.storage_path)
+    if not src_abs.exists():
+        return {
+            "ready": False,
+            "message": "课件文件不存在或已被清理",
+            "preview_path": None,
+            "page_count": _ppt_page_count(lesson),
+        }
+
+    pdf_abs = src_abs if src_abs.suffix.lower() == ".pdf" else src_abs.with_suffix(".pdf")
+    if pdf_abs is None or not pdf_abs.exists():
+        return {
+            "ready": False,
+            "message": "课件预览尚在准备中（或转换能力未配置）",
+            "preview_path": None,
+            "page_count": _ppt_page_count(lesson),
+        }
+
+    return {
+        "ready": True,
+        "message": "ok",
+        "preview_path": f"/api/lesson/{lesson.id}/ppt-preview/file",
+        "page_count": _ppt_page_count(lesson),
+    }
+
+
+@router.get("/lesson/{lesson_id}/ppt-preview/file")
+def stream_lesson_ppt_preview_file(
+    lesson_id: str,
+    db: Session = Depends(get_db),
+    teacher_id_q: str | None = Query(default=None, alias="teacher_id"),
+    x_teacher_id: str | None = Header(default=None, alias="X-Teacher-Id"),
+):
+    teacher_id = str(teacher_id_q or x_teacher_id or "").strip()
+    if not teacher_id:
+        raise HTTPException(status_code=401, detail="缺少教师身份，请重新登录")
+
+    lesson = db.get(Lesson, _parse_uuid(lesson_id, "lesson_id"))
+    if lesson is None:
+        raise HTTPException(status_code=404, detail="lesson 不存在")
+
+    has_access = any(
+        s.teacher_id in {teacher_id, _LEGACY_TEACHER_ID}
+        for s in (lesson.sessions or [])
+    )
+    if not has_access:
+        raise HTTPException(status_code=403, detail="无权访问该课堂")
+
+    source = _find_preview_source_file(lesson)
+    if source is None:
+        raise HTTPException(status_code=404, detail="未找到可预览课件文件")
+    src_abs = resolve_upload_path(source.storage_path)
+    if not src_abs.exists():
+        raise HTTPException(status_code=404, detail="课件文件不存在")
+
+    pdf_abs = src_abs if src_abs.suffix.lower() == ".pdf" else src_abs.with_suffix(".pdf")
+    if pdf_abs is None or not pdf_abs.exists():
+        raise HTTPException(status_code=409, detail="预览文件尚未就绪")
+    return FileResponse(
+        path=pdf_abs,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'inline; filename="{pdf_abs.stem}.pdf"'
+        },
+    )
+
+
 @router.post("/session/{session_id}/restart", response_model=InitLessonResponse)
 def restart_classroom_session(
     session_id: str,
     db: Session = Depends(get_db),
+    teacher_id: str = Depends(get_current_teacher_id),
 ) -> InitLessonResponse:
     old_session = db.get(ClassroomSession, _parse_uuid(session_id, "session_id"))
     if old_session is None:
         raise HTTPException(status_code=404, detail="session 不存在")
+    if old_session.teacher_id not in {teacher_id, _LEGACY_TEACHER_ID}:
+        raise HTTPException(status_code=403, detail="无权访问该课堂")
 
     lesson = old_session.lesson
     new_session = ClassroomSession(
         lesson_id=lesson.id,
+        teacher_id=teacher_id,
         status="pending" if lesson.embedding_status != "done" else "ready",
         frontend_session_id=old_session.frontend_session_id,
     )

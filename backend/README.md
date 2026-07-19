@@ -18,7 +18,7 @@ pip install -r requirements.txt
 
 数据库支持两种方式（二选一）：
 
-1. **完整 URL**：`DATABASE_URL=postgresql+psycopg://user:URL编码密码@host:5432/postgres?sslmode=require`  
+1. **完整 URL**：`DATABASE_URL=postgresql+psycopg://user:URL编码密码@host:5432/postgres?sslmode=require`
    - 密码含 `,` `.` `/` 等字符时必须做 URL 编码。
 2. **分项变量**：`POSTGRES_USER`、`POSTGRES_PASSWORD`、`POSTGRES_HOST`、`POSTGRES_PORT`、`POSTGRES_DB`、`POSTGRES_SSLMODE`（应用内会对密码做 `quote_plus`）。
 
@@ -57,7 +57,7 @@ curl -s http://localhost:8000/api/inclass/student-states/$(echo $SESSION_ID)
 ```json
 [
   {"student_id":"student_xm","student_name":"小明","student_type":"xueyou","is_hand_raised":true,"is_sleeping":false,"is_whispering":false},
-  {"student_id":"student_xw","student_name":"小闻","student_type":"gangjing","is_hand_raised":true,"is_sleeping":false,"is_whispering":false},
+  {"student_id":"student_xw","student_name":"小红","student_type":"gangjing","is_hand_raised":true,"is_sleeping":false,"is_whispering":false},
   {"student_id":"student_xw2","student_name":"小王","student_type":"xuekun","is_hand_raised":false,"is_sleeping":false,"is_whispering":false},
   {"student_id":"student_xl","student_name":"小乐","student_type":"xuekun","is_hand_raised":false,"is_sleeping":false,"is_whispering":false}
 ]
@@ -122,7 +122,7 @@ curl -s -X POST http://localhost:8000/api/inclass/utterance -H "Content-Type: ap
 | `teacher_context` | 否 | 教师背景描述（与前端对接用） |
 | `file` | 否 | 教案：pdf/doc/docx/ppt/pptx，最大 20MB |
 
-成功：`{"lesson_id":"...","status":"processing","message":"..."}`  
+成功：`{"lesson_id":"...","status":"processing","message":"..."}`
 错误：`{"code":400,"message":"..."}`（或其它 HTTP 状态码）。
 
 ### `POST /api/debug/transcribe`
