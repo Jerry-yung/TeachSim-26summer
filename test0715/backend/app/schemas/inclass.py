@@ -25,6 +25,7 @@ class InclassUtteranceRequest(BaseModel):
     current_timestamp: str
     called_student_id: Optional[str] = None
     discipline_student_id: Optional[str] = None  # 前端触发 discipline 时的目标学生
+    slide_no: Optional[int] = None
     current_ppt: Optional[List[Dict[str, Any]]] = None
     skip_supervisor: bool = False
     discipline_action: Optional[str] = None  # start_whisper | start_sleep | cancel_whisper | cancel_sleep
@@ -103,6 +104,7 @@ class StudentReplyRequest(BaseModel):
     session_id: str
     student_id: str
     current_timestamp: str
+    slide_no: Optional[int] = None
     current_ppt: Optional[List[Dict[str, Any]]] = None
 
 

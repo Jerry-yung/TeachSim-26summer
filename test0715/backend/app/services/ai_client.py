@@ -41,6 +41,22 @@ class AIClient:
         data = {"grade": grade, "subject": subject}
         return await self._post_multipart("/ai/parse_lesson", data=data, files=files)
 
+    async def parse_ppt_file(
+        self,
+        *,
+        filename: str,
+        content: bytes,
+        content_type: str | None = None,
+    ) -> dict[str, Any]:
+        files = {
+            "file": (filename, content, content_type or "application/octet-stream"),
+        }
+        return await self._post_multipart(
+            "/ai/v2/preclass/ppt/parse",
+            data={},
+            files=files,
+        )
+
     async def parse_lessons(
         self,
         *,

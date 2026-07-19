@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -62,6 +62,11 @@ DISCIPLINE_ACTION_ALIASES = {
     "sleep": "start_sleep",
 }
 
+# 缓存 lesson 的单页 PPT 上下文，避免重复扫描 slides 列表
+_LESSON_SLIDE_CONTEXT_CACHE: dict[tuple[str, int], dict | None] = {}
+# 记录每个 session 最近一次使用的页号和 payload，页号不变时直接复用
+_SESSION_LAST_UTTERANCE_PPT_CACHE: dict[str, tuple[int, list[dict] | None]] = {}
+
 
 def _log_decision_snapshot(
     *,
@@ -82,6 +87,7 @@ def _log_decision_snapshot(
                 "role": request.role,
                 "content": request.content,
                 "current_timestamp": request.current_timestamp,
+                "slide_no": request.slide_no,
                 "called_student_id": request.called_student_id,
                 "discipline_student_id": request.discipline_student_id,
                 "discipline_action": request.discipline_action,
@@ -137,11 +143,8 @@ def _resolve_ppt_context(
         return body.ppt_context
     if body.current_ppt:
         return body.current_ppt[0]
-    if body.slide_no and session.lesson.ppt_payload:
-        slides = session.lesson.ppt_payload.get("slides") or []
-        for slide in slides:
-            if int(slide.get("slide_no", 0) or 0) == int(body.slide_no):
-                return copy_slide_without_none(slide)
+    if body.slide_no:
+        return _resolve_slide_context_from_lesson(session, body.slide_no)
     if body.ppt_text:
         return {
             "slide_no": body.slide_no,
@@ -150,6 +153,51 @@ def _resolve_ppt_context(
             "visual_elements": [],
             "summary": body.ppt_text[:120],
         }
+    return None
+
+
+def _resolve_slide_context_from_lesson(
+    session: ClassroomSession,
+    slide_no: int,
+) -> dict | None:
+    lesson_id = str(session.lesson_id)
+    key = (lesson_id, int(slide_no))
+    if key in _LESSON_SLIDE_CONTEXT_CACHE:
+        return _LESSON_SLIDE_CONTEXT_CACHE[key]
+
+    resolved: dict | None = None
+    if session.lesson.ppt_payload:
+        slides = session.lesson.ppt_payload.get("slides") or []
+        for slide in slides:
+            if int(slide.get("slide_no", 0) or 0) == int(slide_no):
+                resolved = copy_slide_without_none(slide)
+                break
+
+    _LESSON_SLIDE_CONTEXT_CACHE[key] = resolved
+    return resolved
+
+
+def _resolve_utterance_current_ppt(
+    session: ClassroomSession,
+    *,
+    current_ppt: list[dict] | None,
+    slide_no: int | None,
+) -> list[dict] | None:
+    # 兼容旧前端：若已传 current_ppt，直接复用
+    if current_ppt:
+        return current_ppt
+    # 新流程：仅传 slide_no，由后端根据课前解析结果补全当前页
+    if slide_no:
+        sid = str(session.id)
+        normalized_slide_no = int(slide_no)
+        cached = _SESSION_LAST_UTTERANCE_PPT_CACHE.get(sid)
+        if cached and cached[0] == normalized_slide_no:
+            return cached[1]
+
+        resolved_slide = _resolve_slide_context_from_lesson(session, normalized_slide_no)
+        payload = [resolved_slide] if resolved_slide else None
+        _SESSION_LAST_UTTERANCE_PPT_CACHE[sid] = (normalized_slide_no, payload)
+        return payload
     return None
 
 
@@ -305,15 +353,17 @@ async def post_utterance(
         )
 
     # 4.4 构造 supervisor payload
-    student_status_digest = build_student_states_digest(session_students)
     payload = {
         "teacher_text": body.content,
         "current_timestamp": body.current_timestamp,
         "subject": session.lesson.subject,
         "chat_history": _build_chat_history(recent_turns),
-        "current_ppt": body.current_ppt or None,
+        "current_ppt": _resolve_utterance_current_ppt(
+            session,
+            current_ppt=body.current_ppt,
+            slide_no=body.slide_no,
+        ),
         "called_student_status_digest": called_student_digest,
-        "student_status_digest": student_status_digest,
     }
 
     # 4.5 调用 supervisor
@@ -399,6 +449,18 @@ async def post_utterance(
 
     db.commit()
 
+    # supervisor 判定 normal：前端无需消费标准化 JSON，返回 204 最小响应即可
+    if dialog_state == "normal":
+        _log_decision_snapshot(
+            session_id=session.id,
+            stage="supervisor_decision_normal_204",
+            request=body,
+            supervisor_payload=payload,
+            supervisor_raw=result,
+            note="normal state, return 204 no content",
+        )
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
     # 刷新状态用于响应
     session_students = get_session_students(session.id, db)
 
@@ -453,8 +515,13 @@ async def post_student_reply(
     background: dict[str, Any] = {"subject": session.lesson.subject}
 
     # PPT 上下文
-    if body.current_ppt and len(body.current_ppt) > 0:
-        ppt_slide = body.current_ppt[0]
+    resolved_current_ppt = _resolve_utterance_current_ppt(
+        session,
+        current_ppt=body.current_ppt,
+        slide_no=body.slide_no,
+    )
+    if resolved_current_ppt and len(resolved_current_ppt) > 0:
+        ppt_slide = resolved_current_ppt[0]
         background["slide_no"] = ppt_slide.get("slide_no")
         background["slides"] = [ppt_slide]
 
@@ -480,25 +547,30 @@ async def post_student_reply(
         background["student_utterances_on_slide"] = student_utterances
 
     # 4. 调用 AI 模块生成单条回复
+    was_hand_raised = bool(student.is_hand_raised)
     ai_client = AIClient()
     try:
         ai_result = await ai_client.student_reply(
             {
                 "student_type": student.student_type,
                 "trigger_reason": "teacher_question",
-                "is_proactive_speaking": student.is_hand_raised,
+                "is_proactive_speaking": was_hand_raised,
                 "background": background,
             }
         )
     except AIServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
+    # 只要触发一名学生发言，就清空全班举手状态，避免回答后仍举手
+    reset_hand_raised(session.id, db)
+    db.commit()
+
     return StudentReplyResponse(
         student_id=student.student_id,
         student_type=student.student_type,
         reply_text=ai_result.get("reply_text", "（无回复）"),
         emotion=ai_result.get("emotion", "idle"),
-        is_proactive_speaking=ai_result.get("is_proactive_speaking", student.is_hand_raised),
+        is_proactive_speaking=ai_result.get("is_proactive_speaking", was_hand_raised),
     )
 
 

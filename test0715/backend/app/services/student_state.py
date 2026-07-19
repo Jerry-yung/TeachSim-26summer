@@ -117,7 +117,7 @@ def reset_hand_raised(session_id: uuid.UUID, db: Session) -> None:
     db.query(SessionStudent).filter(
         SessionStudent.session_id == session_id,
         SessionStudent.is_hand_raised.is_(True),
-    ).update({"is_hand_raised": False}, synchronize_session=False)
+    ).update({"is_hand_raised": False}, synchronize_session="fetch")
 
 
 def set_hand_raised(
@@ -130,7 +130,7 @@ def set_hand_raised(
     db.query(SessionStudent).filter(
         SessionStudent.session_id == session_id,
         SessionStudent.student_id.in_(student_ids),
-    ).update({"is_hand_raised": True}, synchronize_session=False)
+    ).update({"is_hand_raised": True}, synchronize_session="fetch")
 
 
 def update_discipline_state(

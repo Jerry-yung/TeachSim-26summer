@@ -83,14 +83,14 @@ def build_report_response(
     dimensions, scores = _build_dimensions(ai_report)
     overall_level, overall_desc = _overall_level_and_desc(
         int(ai_report.get("overall_score") or 0),
-        str(ai_report.get("summary") or "").strip(),
+        _normalize_report_wording(str(ai_report.get("summary") or "").strip()),
     )
     custom_goal_feedback = _build_custom_goal_feedback(
         lesson_json=lesson_json,
         ai_report=ai_report,
         scores=scores,
     )
-    highlights = _build_highlight_events(segments, started_at)
+    highlights = _build_highlight_events(segments, turns, started_at)
     lesson_topic = (
         ai_report.get("lesson_topic")
         or lesson_json.get("basic_info", {}).get("lesson_topic")
@@ -282,7 +282,7 @@ def _overall_level_and_desc(overall_score: int, summary: str) -> tuple[str, str]
     else:
         level = "整体需关注"
     if summary:
-        return level, summary[:80]
+        return level, summary.strip()
     return level, "课堂表现已生成，可查看各维度详情"
 
 
@@ -307,7 +307,7 @@ def _build_custom_goal_feedback(
     else:
         score = scores["language_appropriateness"]
     improvements = ai_report.get("priority_improvements") or []
-    feedback = str(ai_report.get("summary") or "").strip()
+    feedback = _normalize_report_wording(str(ai_report.get("summary") or "").strip())
     if improvements:
         feedback = f"{feedback}\n\n建议优先行动：{improvements[0]}"
     return {
@@ -319,6 +319,7 @@ def _build_custom_goal_feedback(
 
 def _build_highlight_events(
     segments: list[SessionSegment],
+    turns: list[SessionTurn],
     started_at: datetime,
 ) -> list[dict[str, Any]]:
     events = []
@@ -328,26 +329,151 @@ def _build_highlight_events(
         strengths = eval_payload.get("strengths") or []
         issues = eval_payload.get("issues") or []
         time_label = _relative_time(started_at, segment.start_ts)
+        teacher_turns, student_turns = _collect_context_turns(
+            segment_payload=segment.segment_payload or {},
+            turns=turns,
+            start_ts=segment.start_ts,
+            end_ts=segment.end_ts,
+        )
         if strengths:
             events.append(
-                {"time": time_label, "type": "good", "text": str(strengths[0])}
+                {
+                    "time": time_label,
+                    "type": "good",
+                    "text": str(strengths[0]),
+                    "teacher_turns": teacher_turns,
+                    "student_turns": student_turns,
+                }
             )
         if issues:
             events.append(
-                {"time": time_label, "type": "warning", "text": str(issues[0])}
+                {
+                    "time": time_label,
+                    "type": "warning",
+                    "text": str(issues[0]),
+                    "teacher_turns": teacher_turns,
+                    "student_turns": student_turns,
+                }
             )
         if len(events) >= 4:
             break
     return events[:4]
 
 
+def _collect_context_turns(
+    *,
+    segment_payload: dict[str, Any],
+    turns: list[SessionTurn],
+    start_ts: datetime,
+    end_ts: datetime,
+) -> tuple[list[str], list[str]]:
+    teacher_from_segment, student_from_segment = _collect_from_segment_payload(
+        segment_payload
+    )
+    if teacher_from_segment or student_from_segment:
+        return teacher_from_segment, student_from_segment
+
+    teacher_turns: list[str] = []
+    student_turns: list[str] = []
+    for turn in turns:
+        if turn.event_ts < start_ts or turn.event_ts > end_ts:
+            continue
+        text = str(turn.content or "").strip()
+        if not text:
+            continue
+        speaker = str(turn.role_label or ("老师" if turn.role_type == "teacher" else "学生")).strip()
+        line = f"{speaker}：{text[:120]}"
+        if turn.role_type == "teacher" and len(teacher_turns) < 2:
+            teacher_turns.append(line)
+        elif turn.role_type == "student" and len(student_turns) < 2:
+            student_turns.append(line)
+        if len(teacher_turns) >= 2 and len(student_turns) >= 2:
+            break
+
+    # Fallback: if segment window is sparse, sample around segment start.
+    if teacher_turns and student_turns:
+        return teacher_turns, student_turns
+
+    around_start = sorted(
+        turns,
+        key=lambda t: abs((t.event_ts - start_ts).total_seconds()),
+    )
+    for turn in around_start:
+        text = str(turn.content or "").strip()
+        if not text:
+            continue
+        speaker = str(turn.role_label or ("老师" if turn.role_type == "teacher" else "学生")).strip()
+        line = f"{speaker}：{text[:120]}"
+        if turn.role_type == "teacher" and len(teacher_turns) < 2:
+            teacher_turns.append(line)
+        elif turn.role_type == "student" and len(student_turns) < 2:
+            student_turns.append(line)
+        if len(teacher_turns) >= 2 and len(student_turns) >= 2:
+            break
+
+    return teacher_turns, student_turns
+
+
+def _collect_from_segment_payload(
+    payload: dict[str, Any],
+) -> tuple[list[str], list[str]]:
+    teacher_turns: list[str] = []
+    student_turns: list[str] = []
+
+    raw_teacher = payload.get("teacher_utterances") or []
+    raw_student = payload.get("student_utterances") or []
+    if not isinstance(raw_teacher, list) and not isinstance(raw_student, list):
+        return teacher_turns, student_turns
+
+    for item in raw_teacher[:2]:
+        if not isinstance(item, dict):
+            continue
+        speaker = _normalize_speaker_label(str(item.get("speaker") or "老师").strip())
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        teacher_turns.append(f"{speaker}：{text[:120]}")
+
+    for item in raw_student[:2]:
+        if not isinstance(item, dict):
+            continue
+        speaker = _normalize_speaker_label(str(item.get("speaker") or "学生").strip())
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        student_turns.append(f"{speaker}：{text[:120]}")
+
+    return teacher_turns, student_turns
+
+
+def _normalize_speaker_label(label: str) -> str:
+    raw = (label or "").strip().lower()
+    if raw in {"teacher", "老师", "teacher_agent"}:
+        return "老师"
+    if raw in {"student", "学生"}:
+        return "学生"
+    return label or "学生"
+
+
 def _format_suggestions(ai_report: dict[str, Any]) -> str:
-    summary = str(ai_report.get("summary") or "").strip()
+    summary = _normalize_report_wording(str(ai_report.get("summary") or "").strip())
     improvements = ai_report.get("priority_improvements") or []
     parts = [summary] if summary else []
     for idx, item in enumerate(improvements[:4], start=1):
-        parts.append(f"{idx}. {item}")
+        parts.append(f"{idx}. {_normalize_report_wording(str(item))}")
     return "\n\n".join(parts).strip() or "本次课堂已生成改进建议。"
+
+
+def _normalize_report_wording(text: str) -> str:
+    out = str(text or "")
+    replacements = {
+        "breakthrough_focus": "训练重点",
+        "PPT内容普遍缺失": "本节课未使用PPT辅助讲解",
+        "必须": "建议",
+    }
+    for old, new in replacements.items():
+        out = out.replace(old, new)
+    return out
 
 
 def _looks_like_question(text: str) -> bool:

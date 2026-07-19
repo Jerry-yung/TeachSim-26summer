@@ -196,3 +196,32 @@ def get_lesson_status(
         knowledge_points_preview=preview,
         teacher_questions=teacher_questions,
     )
+
+
+@router.post("/session/{session_id}/restart", response_model=InitLessonResponse)
+def restart_classroom_session(
+    session_id: str,
+    db: Session = Depends(get_db),
+) -> InitLessonResponse:
+    old_session = db.get(ClassroomSession, _parse_uuid(session_id, "session_id"))
+    if old_session is None:
+        raise HTTPException(status_code=404, detail="session 不存在")
+
+    lesson = old_session.lesson
+    new_session = ClassroomSession(
+        lesson_id=lesson.id,
+        status="pending" if lesson.embedding_status != "done" else "ready",
+        frontend_session_id=old_session.frontend_session_id,
+    )
+    db.add(new_session)
+    db.commit()
+
+    initialize_session_students(new_session.id, lesson.class_level, db=db)
+    db.commit()
+
+    return InitLessonResponse(
+        lesson_id=str(lesson.id),
+        session_id=str(new_session.id),
+        status="ready" if lesson.embedding_status == "done" else "processing",
+        message="已基于当前课前配置创建新课堂",
+    )

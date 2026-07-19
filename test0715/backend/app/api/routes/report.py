@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -23,13 +23,14 @@ def _parse_uuid(raw: str) -> uuid.UUID:
 @router.get("/report/{session_id}")
 async def get_report(
     session_id: str,
+    force_refresh: bool = Query(False, alias="force"),
     db: Session = Depends(get_db),
 ):
     session = db.get(ClassroomSession, _parse_uuid(session_id))
     if session is None:
         raise HTTPException(status_code=404, detail="session 不存在")
 
-    if session.report_payload:
+    if session.report_payload and not force_refresh:
         return session.report_payload
 
     if session.ended_at is None:
