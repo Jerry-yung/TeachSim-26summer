@@ -41,6 +41,22 @@ class AIClient:
         data = {"grade": grade, "subject": subject}
         return await self._post_multipart("/ai/parse_lesson", data=data, files=files)
 
+    async def parse_ppt_file(
+        self,
+        *,
+        filename: str,
+        content: bytes,
+        content_type: str | None = None,
+    ) -> dict[str, Any]:
+        files = {
+            "file": (filename, content, content_type or "application/octet-stream"),
+        }
+        return await self._post_multipart(
+            "/ai/v2/preclass/ppt/parse",
+            data={},
+            files=files,
+        )
+
     async def parse_lessons(
         self,
         *,
@@ -58,8 +74,14 @@ class AIClient:
     async def supervisor_decide(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._post_json("/ai/v2/inclass/supervisor/decide", payload)
 
+    async def agent_reply(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self._post_json("/ai/agent/reply", payload)
+
     async def segment_eval(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._post_json("/ai/v2/inclass/segment/eval", payload)
+
+    async def student_reply(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self._post_json("/ai/v2/inclass/student/reply", payload)
 
     async def generate_report(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._post_json("/ai/v2/postclass/report/generate", payload)

@@ -137,7 +137,7 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 若保持前端当前默认代理，则把端口改为 8010。不要使用 `uvicorn main:app`，因为应用入口位于 `backend/app/main.py`。
 
-健康检查：`GET http://localhost:8000/health`（端口按实际配置）  
+健康检查：`GET http://localhost:8000/health`（端口按实际配置）
 Swagger：`http://localhost:8000/docs`
 
 ### 3. 前端（5173）
@@ -196,6 +196,3 @@ Supervisor 联调尤其要同时核对：
 - 提交前检查 `git status`，不要提交 `.env`、上传文件、构建产物或真实凭据。
 
 ---
-
-
-

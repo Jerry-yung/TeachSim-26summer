@@ -23,9 +23,13 @@ class InclassUtteranceRequest(BaseModel):
     role: str
     content: str
     current_timestamp: str
+    class_elapsed_sec: Optional[int] = None
     called_student_id: Optional[str] = None
+    discipline_student_id: Optional[str] = None  # 前端触发 discipline 时的目标学生
+    slide_no: Optional[int] = None
     current_ppt: Optional[List[Dict[str, Any]]] = None
     skip_supervisor: bool = False
+    discipline_action: Optional[str] = None  # start_whisper | start_sleep | cancel_whisper | cancel_sleep
 
     @field_validator("role", "content", "current_timestamp")
     @classmethod
@@ -53,6 +57,8 @@ class InclassSegmentRequest(BaseModel):
     segment_id: str
     start_ts: str
     end_ts: str
+    start_elapsed_sec: Optional[int] = None
+    end_elapsed_sec: Optional[int] = None
     slide_no: Optional[int] = None
     teacher_utterances: List[SegmentTurnPayload] = Field(default_factory=list)
     student_utterances: List[SegmentTurnPayload] = Field(default_factory=list)
@@ -68,7 +74,50 @@ class InclassSegmentRequest(BaseModel):
         return value.strip()
 
 
+class StudentStateItem(BaseModel):
+    student_id: str
+    student_type: str
+    is_hand_raised: bool
+
+
+class InclassUtteranceResponse(BaseModel):
+    dialog_state: str
+    should_trigger_student: bool
+    trigger_reason: Optional[str] = None
+    target_student_type: Optional[str] = None
+    interaction_round_id: str
+    play_mode: str  # immediate | on_call_name
+    raised_hand_student_ids: List[str] = Field(default_factory=list)
+    preset_for_student_id: Optional[str] = None
+    student_states_digest: List[StudentStateItem] = Field(default_factory=list)
+    preset_consumed: bool = False
+    student_event: Optional[Any] = None
+
+
 class StudentStateResponse(BaseModel):
     student_id: str
     student_type: str
     is_hand_raised: bool
+    is_sleeping: bool = False
+    is_whispering: bool = False
+    student_name: str = ""
+
+
+class StudentReplyRequest(BaseModel):
+    session_id: str
+    student_id: str
+    current_timestamp: str
+    class_elapsed_sec: Optional[int] = None
+    slide_no: Optional[int] = None
+    current_ppt: Optional[List[Dict[str, Any]]] = None
+    question_bundle_text: Optional[str] = None
+    question_count: Optional[int] = None
+    question_items: Optional[List[Dict[str, Any]]] = None
+
+
+class StudentReplyResponse(BaseModel):
+    student_id: str
+    student_type: str
+    reply_text: str
+    emotion: str
+    is_proactive_speaking: bool

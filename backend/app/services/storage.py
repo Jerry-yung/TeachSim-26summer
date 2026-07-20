@@ -17,6 +17,15 @@ def ensure_upload_root() -> Path:
     return root
 
 
+def resolve_upload_path(rel_storage_path: str) -> Path:
+    root = ensure_upload_root()
+    rel = Path(rel_storage_path or "")
+    abs_path = (root / rel).resolve()
+    if root != abs_path and root not in abs_path.parents:
+        raise ValueError("非法文件路径")
+    return abs_path
+
+
 async def save_lesson_file(lesson_id: uuid.UUID, upload: UploadFile) -> tuple[str, int]:
     name = upload.filename or "upload"
     suffix = Path(name).suffix.lower()

@@ -1069,7 +1069,6 @@ async function completeResetFlow() {
   gap: 2px;
   margin-bottom: 22px;
 }
-
 .hl-line {
   display: block;
   font-size: 72px;

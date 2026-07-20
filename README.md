@@ -1,6 +1,6 @@
 # TeachSim-26summer
 
-26 暑期软件工程实践项目 — TeachSim  
+26 暑期软件工程实践项目 — TeachSim
 配有虚拟学生的 AI 辅助授课训练平台。
 
 ## 仓库结构

@@ -75,6 +75,7 @@ class ClassroomSession(Base):
         UUID(as_uuid=True), ForeignKey("lessons.id", ondelete="CASCADE"), index=True
     )
     status: Mapped[str] = mapped_column(String(32), default="pending")
+    teacher_id: Mapped[str] = mapped_column(String(128), index=True)
     frontend_session_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     report_payload: Mapped[Optional[Dict]] = mapped_column(JSONB, nullable=True)
     started_at: Mapped[Optional[datetime]] = mapped_column(
@@ -95,6 +96,9 @@ class ClassroomSession(Base):
         back_populates="session", cascade="all, delete-orphan"
     )
     segments: Mapped[List["SessionSegment"]] = relationship(
+        back_populates="session", cascade="all, delete-orphan"
+    )
+    students: Mapped[List["SessionStudent"]] = relationship(
         back_populates="session", cascade="all, delete-orphan"
     )
 
@@ -143,6 +147,8 @@ class SessionTurn(Base):
     role_label: Mapped[str] = mapped_column(String(128))
     content: Mapped[str] = mapped_column(Text)
     event_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    class_elapsed_sec: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    slide_no: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     called_student_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
