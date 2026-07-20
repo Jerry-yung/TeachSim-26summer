@@ -5,7 +5,7 @@
 ## 1. 通用约定
 
 - 编码：UTF-8
-- 时间戳：统一使用 ISO8601（含时区），示例 `2026-07-19T08:05:10+08:00`
+- 时间戳：统一使用 ISO8601（含时区），示例 `2026-07-20T08:05:10+08:00`
 - 请求追踪：后端应传 `trace_id`；AI 原样回传
 - 幂等键：涉及文件解析任务时，后端应传 `idempotency_key`
 
@@ -144,7 +144,7 @@
   "error_message": "internal llm error",
   "error_detail": "optional detail",
   "trace_id": "from-backend-or-ai",
-  "timestamp": "2026-07-19T08:10:00+08:00"
+  "timestamp": "2026-07-20T08:10:00+08:00"
 }
 ```
 

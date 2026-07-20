@@ -65,8 +65,8 @@
   "segment_evals": [
     {
       "segment_id": "seg-001",
-      "start_ts": "2026-07-19T08:05:10+08:00",
-      "end_ts": "2026-07-19T08:08:42+08:00",
+      "start_ts": "2026-07-20T08:05:10+08:00",
+      "end_ts": "2026-07-20T08:08:42+08:00",
       "slide_no": 2,
       "scores": {
         "instructional_clarity": 86,
@@ -89,8 +89,8 @@
     },
     {
       "segment_id": "seg-002",
-      "start_ts": "2026-07-19T08:09:10+08:00",
-      "end_ts": "2026-07-19T08:12:30+08:00",
+      "start_ts": "2026-07-20T08:09:10+08:00",
+      "end_ts": "2026-07-20T08:12:30+08:00",
       "slide_no": 3,
       "scores": {
         "instructional_clarity": 83,
@@ -113,8 +113,8 @@
     },
     {
       "segment_id": "seg-003",
-      "start_ts": "2026-07-19T08:13:00+08:00",
-      "end_ts": "2026-07-19T08:16:20+08:00",
+      "start_ts": "2026-07-20T08:13:00+08:00",
+      "end_ts": "2026-07-20T08:16:20+08:00",
       "slide_no": 4,
       "scores": {
         "instructional_clarity": 80,
