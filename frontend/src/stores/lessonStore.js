@@ -437,8 +437,11 @@ export const useLessonStore = defineStore('lesson', () => {
 
   function _normalizedAtmosphere(raw) {
     if (raw === '活跃互动型') return '活跃'
-    if (raw === '严谨讨论型') return '活跃'
-    if (raw === '练习主导型') return '活跃'
+    if (raw === '均衡参与型') return '均衡'
+    if (raw === '沉浸讲解型' || raw === '沉浸讲授型') return '沉闷'
+    // 课前问卷历史/兼容
+    if (raw === '严谨讨论型' || raw === '练习主导型') return '活跃'
+    if (raw === '活跃' || raw === '沉闷' || raw === '均衡') return raw
     return '沉闷'
   }
 

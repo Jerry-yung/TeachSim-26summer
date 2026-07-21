@@ -181,7 +181,7 @@ import {
 } from '@/api/ai'
 import StudentFigure from '@/components/classroom/StudentFigure.vue'
 import { XfyunASRClient, isXfyunSupported } from '@/api/xfyunAsr'
-import { minimaxSpeak, stopMinimaxPlayback } from '@/api/minimaxTts.js'
+import { isMinimaxPlaying, minimaxSpeak, stopMinimaxPlayback } from '@/api/minimaxTts.js'
 import { getXiaomingIdleVideoSrc } from '@/config/studentMedia'
 import {
   loadPptPdfDocument,
@@ -259,6 +259,9 @@ let supervisorBusy = false
 let sentenceBuffer = ''
 let clearRespTimer = null
 let clearPipelineErrorTimer = null
+/** 递增以区分被 cancel 或新发言打断的语音会话 */
+let speechGeneration = 0
+let browserSpeechReject = null
 const latestQuestioningEvents = ref([])
 const pendingDeferredRound = ref(null)
 const questioningBundle = ref({
@@ -761,7 +764,16 @@ function applyDisciplinePose(studentId, action) {
 
 function isStudentSpeakingNow() {
   const speakingApi = Boolean(window?.speechSynthesis?.speaking)
-  return speakingApi || Boolean(currentResp.value) || Boolean(activeStudent.value)
+  return speakingApi || isMinimaxPlaying() || Boolean(currentResp.value) || Boolean(activeStudent.value)
+}
+
+function finishStudentSpeechUi(speechId) {
+  if (speechId !== speechGeneration) return
+  clearTimeout(clearRespTimer)
+  clearRespTimer = null
+  currentResp.value = null
+  activeStudent.value = null
+  clearStanding()
 }
 
 function isDeferredRoundBlocking() {
@@ -963,9 +975,12 @@ async function reconnectAsr(reason = '') {
   if (!isRecording.value || asrStoppingManually || asrReconnectInFlight) return
   asrReconnectInFlight = true
   try {
-    asrClient?.stop()
-    asrClient = buildXfyunClient()
-    await asrClient.start()
+    if (!asrClient) {
+      asrClient = buildXfyunClient()
+      await asrClient.start()
+    } else {
+      await asrClient.resumeAfterFailure()
+    }
     asrReconnectAttempt = 0
     micError.value = ''
     if (reason) console.info('[XFYUN ASR] reconnect success:', reason)
@@ -1098,24 +1113,44 @@ function mergeFinalWithInterim(finalText, interim) {
   return `${i}${f}`
 }
 
-function mergeInterimText(prev, incoming) {
-  const p = String(prev || '')
-  const n = String(incoming || '')
-  if (!p) return n
-  if (!n) return p
-  if (n.startsWith(p)) return n
-  if (p.startsWith(n)) return p
-  if (p.includes(n)) return p
-  if (n.includes(p)) return n
-  return `${p}${n}`
+/** 讯飞 interim 每次返回当前整句猜测，直接覆盖而非拼接 */
+function mergeInterimText(_prev, incoming) {
+  return String(incoming || '')
+}
+
+/** 写入正式转写时去掉与已有尾部重叠的部分，避免 interim 兜底 + final 重复上屏 */
+function appendTranscriptChunk(chunk) {
+  const c = String(chunk || '').trim()
+  if (!c) return ''
+
+  const prev = transcript.value
+  if (!prev) {
+    transcript.value = c
+    return c
+  }
+  if (prev.endsWith(c)) return ''
+
+  let overlap = 0
+  const maxOverlap = Math.min(prev.length, c.length)
+  for (let i = maxOverlap; i > 0; i -= 1) {
+    if (prev.endsWith(c.slice(0, i))) {
+      overlap = i
+      break
+    }
+  }
+  const delta = c.slice(overlap)
+  if (!delta) return ''
+  transcript.value += delta
+  return delta
 }
 
 function commitInterimAsFinal() {
   const pending = String(interimText.value || '').trim()
   if (!pending) return
   interimText.value = ''
-  transcript.value += pending
-  const completed = consumeCompletedSentences(pending)
+  const appended = appendTranscriptChunk(pending)
+  if (!appended) return
+  const completed = consumeCompletedSentences(appended)
   completed.forEach((sentence) => {
     const ts = nowIso()
     const classElapsedSec = nowClassElapsedSec()
@@ -1124,8 +1159,15 @@ function commitInterimAsFinal() {
   })
 }
 
+function isNoiseOnlyAsrText(text) {
+  const t = String(text || '').trim()
+  if (!t) return true
+  return /^[嗯呃啊哦]+[。，、！？…]*$/.test(t)
+}
+
 function appendTranscript(text, meta = {}) {
   if (!text?.trim()) return
+  if (isNoiseOnlyAsrText(text)) return
   if (Date.now() < asrMuteUntilMs) return
   micError.value = ''
   const isFinal = Boolean(meta?.isFinal)
@@ -1144,9 +1186,10 @@ function appendTranscript(text, meta = {}) {
   }
   clearTimeout(interimCommitTimer)
 
-  const committed = mergeFinalWithInterim(text, interimText.value)
+  const merged = mergeFinalWithInterim(text, interimText.value)
   interimText.value = ''
-  transcript.value += committed
+  const committed = appendTranscriptChunk(merged)
+  if (!committed) return
 
   nextTick(() => {
     if (scrollEl.value) scrollEl.value.scrollTop = scrollEl.value.scrollHeight
@@ -1173,15 +1216,12 @@ function buildXfyunClient() {
   return new XfyunASRClient({
     onText: appendTranscript,
     onError: (message) => {
-      console.warn('[XFYUN ASR] error:', message)
+      console.warn('[XFYUN ASR] fatal:', message)
       if (!isRecording.value || asrStoppingManually) return
       scheduleAsrReconnect(message)
     },
-    onClose: (evt) => {
-      if (!isRecording.value || asrStoppingManually) return
-      const code = evt?.code ?? 'unknown'
-      scheduleAsrReconnect(`ws close ${code}`)
-    },
+    // 句末轮转 / 10165 静默续听在 XfyunASRClient 内部处理，不在 onClose 里整段重连
+    onClose: () => {},
   })
 }
 
@@ -1610,16 +1650,19 @@ async function playStudentEvent(eventObj) {
     called_student_id: null,
   })
 
-  void speakStudent(resp.reply_text, resp.student_id, resp.student_type)
-
-  clearTimeout(clearRespTimer)
-  const delay = Math.max(3000, resp.reply_text.length * 280 + 1500)
-  asrMuteUntilMs = Math.max(asrMuteUntilMs, Date.now() + delay + 800)
-  clearRespTimer = setTimeout(() => {
-    currentResp.value = null
-    activeStudent.value = null
-    clearStanding()
-  }, delay)
+  const speechId = ++speechGeneration
+  try {
+    await speakStudent(resp.reply_text, resp.student_id, resp.student_type)
+    if (speechId === speechGeneration) {
+      asrMuteUntilMs = Math.max(asrMuteUntilMs, Date.now() + 800)
+    }
+  } catch (e) {
+    if (e?.message !== 'speech-cancelled' && e?.message !== 'MiniMax playback cancelled') {
+      console.warn('[TTS] 播放失败，仍结束站立姿态：', e?.message || e)
+    }
+  } finally {
+    finishStudentSpeechUi(speechId)
+  }
 }
 
 async function flushCurrentSegment(reason = 'manual') {
@@ -1665,28 +1708,52 @@ async function flushCurrentSegment(reason = 'manual') {
   }
 }
 
-// ── TTS：优先后端 MiniMax T2A，失败则浏览器原生 ──
-function cancelAllSpeech() {
-  stopMinimaxPlayback()
+// ── TTS：优先后端 MiniMax T2A，失败则浏览器原生；播完才 resolve ──
+function cancelBrowserSpeech() {
+  if (browserSpeechReject) {
+    const reject = browserSpeechReject
+    browserSpeechReject = null
+    reject(new Error('speech-cancelled'))
+  }
   window.speechSynthesis?.cancel()
 }
 
+function cancelAllSpeech() {
+  stopMinimaxPlayback()
+  cancelBrowserSpeech()
+}
+
 function speakWithBrowser(text, agentType) {
-  if (!window.speechSynthesis) return
-  window.speechSynthesis.cancel()
+  const trimmed = String(text || '').trim()
+  if (!trimmed) return Promise.resolve()
+  if (!window.speechSynthesis) return Promise.resolve()
 
-  const u = new SpeechSynthesisUtterance(text)
-  u.lang = 'zh-CN'
+  cancelBrowserSpeech()
 
-  switch (agentType) {
-    case 'gangjing': u.pitch = 1.25; u.rate = 1.1;  break
-    case 'xuekun':   u.pitch = 0.85; u.rate = 0.88; break
-    case 'sleepy':   u.pitch = 0.70; u.rate = 0.80; break
-    case 'whisper':  u.pitch = 1.00; u.rate = 0.95; u.volume = 0.65; break
-    default:         u.pitch = 1.00; u.rate = 0.95
-  }
+  return new Promise((resolve, reject) => {
+    browserSpeechReject = reject
+    const u = new SpeechSynthesisUtterance(trimmed)
+    u.lang = 'zh-CN'
 
-  window.speechSynthesis.speak(u)
+    switch (agentType) {
+      case 'gangjing': u.pitch = 1.25; u.rate = 1.1;  break
+      case 'xuekun':   u.pitch = 0.85; u.rate = 0.88; break
+      case 'sleepy':   u.pitch = 0.70; u.rate = 0.80; break
+      case 'whisper':  u.pitch = 1.00; u.rate = 0.95; u.volume = 0.65; break
+      default:         u.pitch = 1.00; u.rate = 0.95
+    }
+
+    const done = (err) => {
+      if (browserSpeechReject !== reject) return
+      browserSpeechReject = null
+      if (err) reject(err)
+      else resolve()
+    }
+
+    u.onend = () => done()
+    u.onerror = () => done(new Error('browser-tts-error'))
+    window.speechSynthesis.speak(u)
+  })
 }
 
 async function speakStudent(text, studentId, agentType) {
@@ -1694,9 +1761,8 @@ async function speakStudent(text, studentId, agentType) {
   const usedMinimax = await minimaxSpeak(text, {
     studentId: studentId || null,
   })
-  if (!usedMinimax) {
-    speakWithBrowser(text, agentType)
-  }
+  if (usedMinimax) return
+  await speakWithBrowser(text, agentType)
 }
 
 // ── Controls ──
@@ -1779,6 +1845,7 @@ async function endClass() {
   flushResidualSentence()
   commitInterimAsFinal()
   await flushCurrentSegment('end_class')
+  speechGeneration += 1
   cancelAllSpeech()
   clearDeferredRound(true)
   clearStanding()
@@ -1807,6 +1874,7 @@ onUnmounted(() => {
   stopDisciplineScheduler()
   clearTimeout(clearRespTimer)
   clearTimeout(clearPipelineErrorTimer)
+  speechGeneration += 1
   cancelAllSpeech()
   clearDeferredRound(true)
   clearStanding()

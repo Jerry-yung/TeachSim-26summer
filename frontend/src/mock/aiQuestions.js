@@ -105,7 +105,7 @@ export const DEFAULT_INTERVIEW_QUESTIONS = [
     emoji: '🌡️',
     required: true,
     skippable: false,
-    options: ['活跃互动型', '沉浸讲解型', '严谨讨论型', '练习主导型'],
+    options: ['活跃互动型', '均衡参与型', '沉浸讲解型'],
   },
 ]
 

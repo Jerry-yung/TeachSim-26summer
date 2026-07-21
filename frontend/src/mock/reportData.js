@@ -27,7 +27,7 @@ export const mockReport = {
   lesson_topic: '《六国论》',
   subject: '高中语文 · 古文',
   class_info: '高二 · 重点班',
-  created_at: '2026-04-09 14:32',
+  created_at: '2026-07-21 14:32',
   duration_min: 42,
 
   // 定性总体评价（替代综合分数）

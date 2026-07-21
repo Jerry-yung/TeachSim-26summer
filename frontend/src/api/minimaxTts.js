@@ -18,6 +18,17 @@ export const DEFAULT_VOICE = 'male-qn-qingse'
 
 let activeAudio = null
 let activeObjectUrl = ''
+let playbackResolve = null
+let playbackReject = null
+
+function settlePlayback(err) {
+  const resolve = playbackResolve
+  const reject = playbackReject
+  playbackResolve = null
+  playbackReject = null
+  if (err) reject?.(err)
+  else resolve?.()
+}
 
 function cleanupActivePlayback() {
   if (activeAudio) {
@@ -35,20 +46,27 @@ function cleanupActivePlayback() {
   }
 }
 
+export function isMinimaxPlaying() {
+  const a = activeAudio
+  if (!a) return false
+  return !a.ended
+}
+
 export function stopMinimaxPlayback() {
   cleanupActivePlayback()
+  settlePlayback(new Error('MiniMax playback cancelled'))
 }
 
 /**
  * @param {string} text
  * @param {{ studentId?: string }} [options]
- * @returns {Promise<boolean|null>} true=MiniMax 播放成功；null=降级浏览器 TTS
+ * @returns {Promise<boolean|null>} true=MiniMax 播放完成；null=应降级浏览器 TTS
  */
 export async function minimaxSpeak(text, options = {}) {
   const trimmed = String(text || '').trim()
   if (!trimmed) return null
 
-  cleanupActivePlayback()
+  stopMinimaxPlayback()
 
   try {
     const res = await fetch(`${BACKEND_BASE}/api/tts/minimax/synthesize`, {
@@ -75,25 +93,31 @@ export async function minimaxSpeak(text, options = {}) {
     activeAudio = audio
 
     await new Promise((resolve, reject) => {
+      playbackResolve = resolve
+      playbackReject = reject
       const onDone = () => {
         audio.removeEventListener('ended', onDone)
         audio.removeEventListener('error', onError)
-        resolve()
+        cleanupActivePlayback()
+        settlePlayback()
       }
       const onError = () => {
         audio.removeEventListener('ended', onDone)
         audio.removeEventListener('error', onError)
-        reject(new Error('MiniMax audio playback failed'))
+        cleanupActivePlayback()
+        settlePlayback(new Error('MiniMax audio playback failed'))
       }
       audio.addEventListener('ended', onDone)
       audio.addEventListener('error', onError)
       void audio.play().catch(onError)
     })
 
-    cleanupActivePlayback()
     return true
-  } catch {
+  } catch (err) {
     cleanupActivePlayback()
+    if (err?.message === 'MiniMax playback cancelled') {
+      throw err
+    }
     return null
   }
 }
