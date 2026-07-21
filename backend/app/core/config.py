@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     postgres_db: str = "postgres"
     postgres_sslmode: str = "require"
 
+    jwt_secret: str = "change-me-in-production-use-a-long-random-string"
+
     upload_dir: str = "uploads"
     ai_service_url: str = "http://localhost:8001"
     ai_timeout_s: float = 30.0

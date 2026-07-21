@@ -43,9 +43,7 @@ def list_history_sessions(
     query = (
         db.query(ClassroomSession)
         .options(joinedload(ClassroomSession.lesson))
-        .filter(
-            ClassroomSession.teacher_id.in_([teacher_id, _LEGACY_TEACHER_ID])
-        )
+        .filter(ClassroomSession.teacher_id == teacher_id)
         .order_by(ClassroomSession.created_at.desc())
     )
     if topic and topic.strip():
@@ -103,7 +101,7 @@ def list_history_session_dates(
     query = db.query(
         func.date(func.coalesce(ClassroomSession.started_at, ClassroomSession.created_at))
     ).filter(
-        ClassroomSession.teacher_id.in_([teacher_id, _LEGACY_TEACHER_ID])
+        ClassroomSession.teacher_id == teacher_id
     )
     if topic and topic.strip():
         like_value = f"%{topic.strip()}%"
@@ -156,7 +154,7 @@ def get_history_session(
     session = db.get(ClassroomSession, _parse_uuid(session_id))
     if session is None:
         raise HTTPException(status_code=404, detail="session 不存在")
-    if session.teacher_id not in {teacher_id, _LEGACY_TEACHER_ID}:
+    if session.teacher_id != teacher_id:
         raise HTTPException(status_code=403, detail="无权访问该课堂")
     if not session.report_payload:
         raise HTTPException(status_code=404, detail="该课堂尚未生成报告")
@@ -176,7 +174,7 @@ def delete_history_session(
     session = db.get(ClassroomSession, _parse_uuid(session_id))
     if session is None:
         raise HTTPException(status_code=404, detail="session 不存在")
-    if session.teacher_id not in {teacher_id, _LEGACY_TEACHER_ID}:
+    if session.teacher_id != teacher_id:
         raise HTTPException(status_code=403, detail="无权删除该课堂")
     db.delete(session)
     db.commit()
@@ -191,7 +189,7 @@ def get_latest_preset(
     session = (
         db.query(ClassroomSession)
         .options(joinedload(ClassroomSession.lesson))
-        .filter(ClassroomSession.teacher_id.in_([teacher_id, _LEGACY_TEACHER_ID]))
+        .filter(ClassroomSession.teacher_id == teacher_id)
         .order_by(ClassroomSession.created_at.desc())
         .first()
     )
@@ -234,7 +232,7 @@ def get_ability_profile(
     sessions = (
         db.query(ClassroomSession)
         .filter(
-            ClassroomSession.teacher_id.in_([teacher_id, _LEGACY_TEACHER_ID]),
+            ClassroomSession.teacher_id == teacher_id,
             ClassroomSession.report_payload.isnot(None),
         )
         .order_by(ClassroomSession.created_at.desc())

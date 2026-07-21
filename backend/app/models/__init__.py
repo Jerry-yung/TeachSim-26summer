@@ -6,6 +6,7 @@ from app.models.lesson import (
     SessionTurn,
     Transcript,
 )
+from app.models.teacher import Teacher
 
 __all__ = [
     "Lesson",
@@ -14,4 +15,5 @@ __all__ = [
     "Transcript",
     "SessionTurn",
     "SessionSegment",
+    "Teacher",
 ]
