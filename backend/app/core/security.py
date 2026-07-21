@@ -1,22 +1,45 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from jose import jwt
-from passlib.context import CryptContext
 
-_PWD_CTX = CryptContext(schemes=["bcrypt"], deprecated="auto")
 _ALGORITHM = "HS256"
 _EXPIRE_DAYS = 30
+_PASSWORD_SCHEME = "pbkdf2_sha256"
+_PASSWORD_ITERATIONS = 310000
+
+
+def _derive_password_key(plain: str, salt_hex: str, iterations: int) -> str:
+    derived = hashlib.pbkdf2_hmac(
+        "sha256",
+        plain.encode("utf-8"),
+        bytes.fromhex(salt_hex),
+        iterations,
+    )
+    return derived.hex()
 
 
 def hash_password(plain: str) -> str:
-    return _PWD_CTX.hash(plain)
+    salt_hex = secrets.token_hex(16)
+    derived_hex = _derive_password_key(plain, salt_hex, _PASSWORD_ITERATIONS)
+    return f"{_PASSWORD_SCHEME}${_PASSWORD_ITERATIONS}${salt_hex}${derived_hex}"
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return _PWD_CTX.verify(plain, hashed)
+    try:
+        scheme, iterations_raw, salt_hex, expected_hex = hashed.split("$", 3)
+        iterations = int(iterations_raw)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    if scheme != _PASSWORD_SCHEME:
+        return False
+    actual_hex = _derive_password_key(plain, salt_hex, iterations)
+    return hmac.compare_digest(actual_hex, expected_hex)
 
 
 def create_access_token(data: dict[str, Any]) -> str:

@@ -5,14 +5,16 @@ import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Optional
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
-from app.core.auth import get_current_teacher_id
+from app.api.deps.auth import get_current_user
 from app.db.session import get_db
-from app.models.lesson import ClassroomSession, SessionSegment, SessionTurn
+from app.models.auth import User
+from app.models.lesson import ClassroomSession, Lesson, SessionSegment, SessionTurn
 from app.models.session_student import SessionStudent
 from app.schemas.inclass import (
     InclassSegmentRequest,
@@ -104,7 +106,6 @@ _QUESTION_CUES = {
 _TEACHING_ACTION_CUES = {
     "看",
     "讲",
-    "说",
     "答",
     "回答",
     "解释",
@@ -121,6 +122,9 @@ _TEACHING_ACTION_CUES = {
     "举例",
     "补充",
     "纠错",
+    "请说",
+    "说一说",
+    "说说",
 }
 _CONTENT_CUES = {
     "函数",
@@ -520,13 +524,23 @@ def _build_question_bundle_title(
 def _get_session_or_404(
     db: Session,
     raw_session_id: str,
-    teacher_id: str,
+    current_user: User,
 ) -> ClassroomSession:
-    session = db.get(ClassroomSession, _parse_uuid(raw_session_id, "session_id"))
+    # 使用 joinedload 一次性 JOIN 拉取关联的 lesson，避免后续访问 session.lesson
+    # 触发 N+1 lazy load。/utterance 是高频接口（每句话一次），未优化前每次至少
+    # 2 次 SQL 往返；优化后降为 1 次。
+    session = (
+        db.query(ClassroomSession)
+        .options(joinedload(ClassroomSession.lesson))
+        .join(Lesson, Lesson.id == ClassroomSession.lesson_id)
+        .filter(
+            ClassroomSession.id == _parse_uuid(raw_session_id, "session_id"),
+            Lesson.owner_user_id == current_user.id,
+        )
+        .first()
+    )
     if session is None:
         raise HTTPException(status_code=404, detail="session 不存在")
-    if session.teacher_id not in {teacher_id, _LEGACY_TEACHER_ID}:
-        raise HTTPException(status_code=403, detail="无权访问该课堂")
     return session
 
 
@@ -636,9 +650,9 @@ def _build_empty_response(
 async def post_utterance(
     body: InclassUtteranceRequest,
     db: Session = Depends(get_db),
-    teacher_id: str = Depends(get_current_teacher_id),
+    current_user: User = Depends(get_current_user),
 ):
-    session = _get_session_or_404(db, body.session_id, teacher_id)
+    session = _get_session_or_404(db, body.session_id, current_user)
     event_ts = parse_iso_datetime(body.current_timestamp)
     role_type = _role_type_from_role(body.role)
 
@@ -833,6 +847,7 @@ async def post_utterance(
     trigger_reason = result.get("trigger_reason", "none")
     target_type = result.get("target_student_type")
     student_event = result.get("student_event")
+    question_difficulty = result.get("question_difficulty")
 
     play_mode = "immediate"
     raised_hand_ids: list[str] = []
@@ -924,6 +939,7 @@ async def post_utterance(
         student_states_digest=build_student_states_digest(session_students),
         preset_consumed=False,
         student_event=student_event,
+        question_difficulty=question_difficulty if dialog_state == "questioning" else None,
     )
     _log_decision_snapshot(
         session_id=session.id,
@@ -961,10 +977,10 @@ async def post_utterance(
 async def post_student_reply(
     body: StudentReplyRequest,
     db: Session = Depends(get_db),
-    teacher_id: str = Depends(get_current_teacher_id),
+    current_user: User = Depends(get_current_user),
 ):
     """前端点名后实时获取被点名学生的单条回复。"""
-    session = _get_session_or_404(db, body.session_id, teacher_id)
+    session = _get_session_or_404(db, body.session_id, current_user)
 
     # 1. 获取目标学生状态
     student = get_session_student(session.id, body.student_id, db)
@@ -1095,12 +1111,12 @@ async def post_student_reply(
 @router.get("/student-state/{student_id}", response_model=StudentStateResponse)
 def get_student_state(
     student_id: str,
-    session_id: str | None = None,
+    session_id: Optional[str] = None,
     db: Session = Depends(get_db),
-    teacher_id: str = Depends(get_current_teacher_id),
+    current_user: User = Depends(get_current_user),
 ):
     if session_id:
-        session = _get_session_or_404(db, session_id, teacher_id)
+        session = _get_session_or_404(db, session_id, current_user)
         student = get_session_student(session.id, student_id, db)
         if student is None:
             raise HTTPException(status_code=404, detail="student 不存在")
@@ -1124,9 +1140,9 @@ def get_student_state(
 def get_all_student_states(
     session_id: str,
     db: Session = Depends(get_db),
-    teacher_id: str = Depends(get_current_teacher_id),
+    current_user: User = Depends(get_current_user),
 ):
-    session = _get_session_or_404(db, session_id, teacher_id)
+    session = _get_session_or_404(db, session_id, current_user)
     students = get_session_students(session.id, db)
     return [
         {
@@ -1145,9 +1161,9 @@ def get_all_student_states(
 async def post_segment(
     body: InclassSegmentRequest,
     db: Session = Depends(get_db),
-    teacher_id: str = Depends(get_current_teacher_id),
+    current_user: User = Depends(get_current_user),
 ):
-    session = _get_session_or_404(db, body.session_id, teacher_id)
+    session = _get_session_or_404(db, body.session_id, current_user)
     start_ts = parse_iso_datetime(body.start_ts)
     end_ts = parse_iso_datetime(body.end_ts)
     if end_ts < start_ts:

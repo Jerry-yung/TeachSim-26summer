@@ -21,6 +21,9 @@ class Lesson(Base):
     subject: Mapped[str] = mapped_column(String(128))
     class_level: Mapped[str] = mapped_column(String(64))
     atmosphere: Mapped[str] = mapped_column(String(64))
+    owner_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     custom_goal: Mapped[str] = mapped_column(Text, default="")
     teacher_context: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     embedding_status: Mapped[str] = mapped_column(String(32), default="pending")
@@ -43,6 +46,7 @@ class Lesson(Base):
     sessions: Mapped[List["ClassroomSession"]] = relationship(
         back_populates="lesson", cascade="all, delete-orphan"
     )
+    owner: Mapped[Optional["User"]] = relationship(back_populates="lessons")
 
 
 class LessonFile(Base):

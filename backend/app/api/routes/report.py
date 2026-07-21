@@ -1,20 +1,22 @@
-import uuid
+from __future__ import annotations
+
 import re
+import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
-from app.core.auth import get_current_teacher_id
+from app.api.deps.auth import get_current_user
 from app.db.session import get_db
-from app.models.lesson import ClassroomSession, SessionSegment, SessionTurn
+from app.models.auth import User
+from app.models.lesson import ClassroomSession, Lesson, SessionSegment, SessionTurn
 from app.services.ai_client import AIClient, AIServiceError
-from app.services.lesson_runtime import build_min_lesson_payload
+from app.services.lesson_runtime import build_min_lesson_payload, format_display_datetime
 from app.services.reporting import build_ai_report_fallback, build_report_response
 
 router = APIRouter(tags=["report"])
-_LEGACY_TEACHER_ID = "legacy_teacher"
 
 
 def _parse_uuid(raw: str) -> uuid.UUID:
@@ -24,21 +26,40 @@ def _parse_uuid(raw: str) -> uuid.UUID:
         raise HTTPException(status_code=400, detail="session_id 不是合法 UUID") from exc
 
 
+def _get_owned_session(
+    db: Session,
+    session_id: str,
+    current_user: User,
+) -> Optional[ClassroomSession]:
+    return (
+        db.query(ClassroomSession)
+        .options(joinedload(ClassroomSession.lesson))
+        .join(Lesson, Lesson.id == ClassroomSession.lesson_id)
+        .filter(
+            ClassroomSession.id == _parse_uuid(session_id),
+            Lesson.owner_user_id == current_user.id,
+        )
+        .first()
+    )
+
+
 @router.get("/report/{session_id}")
 async def get_report(
     session_id: str,
     force_refresh: bool = Query(False, alias="force"),
     db: Session = Depends(get_db),
-    teacher_id: str = Depends(get_current_teacher_id),
+    current_user: User = Depends(get_current_user),
 ):
-    session = db.get(ClassroomSession, _parse_uuid(session_id))
+    session = _get_owned_session(db, session_id, current_user)
     if session is None:
         raise HTTPException(status_code=404, detail="session 不存在")
-    if session.teacher_id not in {teacher_id, _LEGACY_TEACHER_ID}:
-        raise HTTPException(status_code=403, detail="无权访问该课堂")
 
     if session.report_payload and not force_refresh:
-        return session.report_payload
+        payload = dict(session.report_payload)
+        anchor = session.started_at or session.created_at
+        if anchor is not None:
+            payload["created_at"] = format_display_datetime(anchor)
+        return payload
 
     if session.ended_at is None:
         session.ended_at = datetime.now(timezone.utc)
@@ -92,13 +113,11 @@ async def get_report(
 def get_recent5_comparison(
     session_id: str,
     db: Session = Depends(get_db),
-    teacher_id: str = Depends(get_current_teacher_id),
+    current_user: User = Depends(get_current_user),
 ):
-    session = db.get(ClassroomSession, _parse_uuid(session_id))
+    session = _get_owned_session(db, session_id, current_user)
     if session is None:
         raise HTTPException(status_code=404, detail="session 不存在")
-    if session.teacher_id not in {teacher_id, _LEGACY_TEACHER_ID}:
-        raise HTTPException(status_code=403, detail="无权访问该课堂")
     if not session.report_payload:
         return {
             "sample_size": 0,
@@ -110,8 +129,9 @@ def get_recent5_comparison(
     anchor_time = session.created_at
     rows = (
         db.query(ClassroomSession)
+        .join(Lesson, Lesson.id == ClassroomSession.lesson_id)
         .filter(
-            ClassroomSession.teacher_id.in_([teacher_id, _LEGACY_TEACHER_ID]),
+            Lesson.owner_user_id == current_user.id,
             ClassroomSession.report_payload.isnot(None),
             ClassroomSession.created_at <= anchor_time,
         )
@@ -137,7 +157,10 @@ def get_recent5_comparison(
         points.append(
             {
                 "session_id": str(item.id),
-                "date": (item.started_at or item.created_at).strftime("%m-%d"),
+                "date": format_display_datetime(
+                    item.started_at or item.created_at,
+                    fmt="%m-%d",
+                ),
                 "is_current": str(item.id) == str(session.id),
                 "avg_speed_wpm": float(hard.get("avg_speed_wpm") or 0),
                 "avg_wait_time_sec": float(hard.get("avg_wait_time_sec") or 0),
@@ -146,7 +169,7 @@ def get_recent5_comparison(
             }
         )
 
-    current = next((p for p in points if p["is_current"]), points[-1])
+    current = next((item for item in points if item["is_current"]), points[-1])
     prev = points[-2] if len(points) >= 2 else None
     defs = [
         ("avg_speed_wpm", "平均语速", "字/分", False),
@@ -158,14 +181,14 @@ def get_recent5_comparison(
     for key, label, unit, higher_better in defs:
         series = [
             {
-                "session_id": p["session_id"],
-                "date": p["date"],
-                "value": round(float(p[key]), 2),
-                "is_current": bool(p["is_current"]),
+                "session_id": item["session_id"],
+                "date": item["date"],
+                "value": round(float(item[key]), 2),
+                "is_current": bool(item["is_current"]),
             }
-            for p in points
+            for item in points
         ]
-        avg5 = sum(float(p[key]) for p in points) / max(len(points), 1)
+        avg5 = sum(float(item[key]) for item in points) / max(len(points), 1)
         current_value = float(current[key])
         prev_value = float(prev[key]) if prev else None
         metrics.append(
@@ -179,7 +202,9 @@ def get_recent5_comparison(
                 "avg5_value": round(avg5, 2),
                 "delta_vs_avg5": round(current_value - avg5, 2),
                 "prev_value": round(prev_value, 2) if prev_value is not None else None,
-                "delta_vs_prev": round(current_value - prev_value, 2) if prev_value is not None else None,
+                "delta_vs_prev": round(current_value - prev_value, 2)
+                if prev_value is not None
+                else None,
             }
         )
     return {
@@ -190,9 +215,9 @@ def get_recent5_comparison(
     }
 
 
-def _count_clarity_issues(session_id: str, report_payload: dict[str, Any] | None = None) -> int:
-    # 按产品约定：近五次对比中的“讲述模糊与错误数”统一来自 report.highlight_events.text 文本匹配。
-    # session_id 参数保留仅为函数签名兼容。
+def _count_clarity_issues(
+    session_id: str, report_payload: Optional[dict[str, Any]] = None
+) -> int:
     _ = session_id
     if isinstance(report_payload, dict):
         highlights = report_payload.get("highlight_events") or []
@@ -210,11 +235,10 @@ def _count_clarity_issues(session_id: str, report_payload: dict[str, Any] | None
 
 
 def _is_clarity_prefix_event(text: str) -> bool:
-    t = str(text or "").strip()
-    normalized = t.replace("：", ":").lower().replace("\u3000", " ")
+    normalized = str(text or "").strip().replace("：", ":").lower().replace("\u3000", " ")
     return (
-        t.startswith("知识点讲述模糊")
-        or t.startswith("知识点讲述错误")
+        normalized.startswith("知识点讲述模糊")
+        or normalized.startswith("知识点讲述错误")
         or bool(re.search(r"触发\s*ambiguous", normalized))
         or bool(re.search(r"触发\s*misstatement", normalized))
     )

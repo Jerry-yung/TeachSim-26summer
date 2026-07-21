@@ -3,12 +3,13 @@ from pathlib import Path
 import sys
 
 from alembic import context
-from sqlalchemy import create_engine, pool
+from sqlalchemy import create_engine, pool, text
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.config import get_settings  # noqa: E402
 from app.db.base import Base  # noqa: E402
+import app.models.auth  # noqa: E402, F401
 import app.models.lesson  # noqa: E402, F401
 import app.models.session_student  # noqa: E402, F401
 import app.models.teacher  # noqa: E402, F401
@@ -44,6 +45,9 @@ def run_migrations_online() -> None:
         context.configure(connection=connection, target_metadata=target_metadata)
 
         with context.begin_transaction():
+            # 托管库常见默认 statement_timeout 较短；ALTER TABLE 等 DDL 等锁会超时。
+            # LOCAL 仅作用于本迁移事务，跑完即恢复。
+            connection.execute(text("SET LOCAL statement_timeout = '30min'"))
             context.run_migrations()
 
 

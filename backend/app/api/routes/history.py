@@ -6,18 +6,18 @@ import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
-from app.core.auth import get_current_teacher_id
+from app.api.deps.auth import get_current_user
 from app.db.session import get_db
+from app.models.auth import User
 from app.models.lesson import ClassroomSession, Lesson, SessionTurn
 
 router = APIRouter(prefix="/history", tags=["history"])
-_LEGACY_TEACHER_ID = "legacy_teacher"
 _DECISION_LOG_PATH = (
     Path(__file__).resolve().parents[2] / "logs" / "inclass_decisions.jsonl"
 )
@@ -30,33 +30,39 @@ def _parse_uuid(raw: str) -> uuid.UUID:
         raise HTTPException(status_code=400, detail="session_id 不是合法 UUID") from exc
 
 
+def _owned_session_query(db: Session, current_user: User):
+    return (
+        db.query(ClassroomSession)
+        .join(Lesson, Lesson.id == ClassroomSession.lesson_id)
+        .filter(Lesson.owner_user_id == current_user.id)
+    )
+
+
 @router.get("/sessions")
 def list_history_sessions(
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    topic: str | None = Query(default=None),
-    start_date: str | None = Query(default=None),
-    end_date: str | None = Query(default=None),
+    topic: Optional[str] = Query(default=None),
+    start_date: Optional[str] = Query(default=None),
+    end_date: Optional[str] = Query(default=None),
     db: Session = Depends(get_db),
-    teacher_id: str = Depends(get_current_teacher_id),
+    current_user: User = Depends(get_current_user),
 ):
     query = (
-        db.query(ClassroomSession)
+        _owned_session_query(db, current_user)
         .options(joinedload(ClassroomSession.lesson))
-        .filter(ClassroomSession.teacher_id == teacher_id)
         .order_by(ClassroomSession.created_at.desc())
     )
     if topic and topic.strip():
         like_value = f"%{topic.strip()}%"
-        query = query.filter(
-            ClassroomSession.lesson.has(Lesson.lesson_topic.ilike(like_value))
-        )
+        query = query.filter(ClassroomSession.lesson.has(Lesson.lesson_topic.ilike(like_value)))
     start_dt = _parse_date_start(start_date)
     end_dt = _parse_date_end(end_date)
     if start_dt is not None:
         query = query.filter(ClassroomSession.created_at >= start_dt)
     if end_dt is not None:
         query = query.filter(ClassroomSession.created_at <= end_dt)
+
     total = query.count()
     rows = query.offset(offset).limit(limit).all()
     items = []
@@ -67,25 +73,13 @@ def list_history_sessions(
             {
                 "session_id": str(row.id),
                 "lesson_id": str(row.lesson_id),
-                "lesson_topic": (
-                    report.get("lesson_topic")
-                    or row.lesson.lesson_topic
-                    or "未命名课程"
-                ),
+                "lesson_topic": report.get("lesson_topic") or row.lesson.lesson_topic or "未命名课程",
                 "subject": report.get("subject") or row.lesson.subject or "通用",
                 "class_info": report.get("class_info") or "",
-                "created_at": (
-                    row.started_at or row.created_at
-                ).isoformat(),
-                "duration_min": hard_stats.get("total_duration_min")
-                or report.get("duration_min")
-                or 0,
+                "created_at": (row.started_at or row.created_at).isoformat(),
+                "duration_min": hard_stats.get("total_duration_min") or report.get("duration_min") or 0,
                 "overall_level": report.get("overall_level") or "未生成报告",
-                "overall_desc": (
-                    report.get("overall_desc")
-                    or report.get("summary")
-                    or "暂无总体评价"
-                ),
+                "overall_desc": report.get("overall_desc") or report.get("summary") or "暂无总体评价",
                 "has_report": bool(row.report_payload),
             }
         )
@@ -94,68 +88,61 @@ def list_history_sessions(
 
 @router.get("/session-dates")
 def list_history_session_dates(
-    topic: str | None = Query(default=None),
+    topic: Optional[str] = Query(default=None),
     db: Session = Depends(get_db),
-    teacher_id: str = Depends(get_current_teacher_id),
+    current_user: User = Depends(get_current_user),
 ):
     query = db.query(
         func.date(func.coalesce(ClassroomSession.started_at, ClassroomSession.created_at))
+    ).join(
+        Lesson, Lesson.id == ClassroomSession.lesson_id
     ).filter(
-        ClassroomSession.teacher_id == teacher_id
+        Lesson.owner_user_id == current_user.id
     )
     if topic and topic.strip():
         like_value = f"%{topic.strip()}%"
-        query = query.filter(
-            ClassroomSession.lesson.has(Lesson.lesson_topic.ilike(like_value))
-        )
+        query = query.filter(ClassroomSession.lesson.has(Lesson.lesson_topic.ilike(like_value)))
     rows = query.distinct().all()
-    values: set[str] = set()
-    for (d,) in rows:
-        if d is None:
-            continue
-        values.add(str(d))
+    values = set()
+    for (value,) in rows:
+        if value is not None:
+            values.add(str(value))
     return {"dates": sorted(values)}
 
 
 def _parse_date_start(raw: str | None) -> datetime | None:
-    if not raw:
-        return None
-    text = raw.strip()
-    if not text:
+    if not raw or not raw.strip():
         return None
     try:
-        d = datetime.fromisoformat(text).date()
+        date_value = datetime.fromisoformat(raw.strip()).date()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="start_date 格式错误，应为 YYYY-MM-DD") from exc
-    return datetime(d.year, d.month, d.day)
+    return datetime(date_value.year, date_value.month, date_value.day)
 
 
 def _parse_date_end(raw: str | None) -> datetime | None:
-    if not raw:
-        return None
-    text = raw.strip()
-    if not text:
+    if not raw or not raw.strip():
         return None
     try:
-        d = datetime.fromisoformat(text).date()
+        date_value = datetime.fromisoformat(raw.strip()).date()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="end_date 格式错误，应为 YYYY-MM-DD") from exc
-    return datetime(d.year, d.month, d.day) + timedelta(days=1) - timedelta(
-        microseconds=1
-    )
+    return datetime(date_value.year, date_value.month, date_value.day) + timedelta(days=1) - timedelta(microseconds=1)
 
 
 @router.get("/sessions/{session_id}")
 def get_history_session(
     session_id: str,
     db: Session = Depends(get_db),
-    teacher_id: str = Depends(get_current_teacher_id),
+    current_user: User = Depends(get_current_user),
 ):
-    session = db.get(ClassroomSession, _parse_uuid(session_id))
+    session = (
+        _owned_session_query(db, current_user)
+        .filter(ClassroomSession.id == _parse_uuid(session_id))
+        .first()
+    )
     if session is None:
         raise HTTPException(status_code=404, detail="session 不存在")
-    if session.teacher_id != teacher_id:
-        raise HTTPException(status_code=403, detail="无权访问该课堂")
     if not session.report_payload:
         raise HTTPException(status_code=404, detail="该课堂尚未生成报告")
     return {
@@ -169,13 +156,15 @@ def get_history_session(
 def delete_history_session(
     session_id: str,
     db: Session = Depends(get_db),
-    teacher_id: str = Depends(get_current_teacher_id),
+    current_user: User = Depends(get_current_user),
 ):
-    session = db.get(ClassroomSession, _parse_uuid(session_id))
+    session = (
+        _owned_session_query(db, current_user)
+        .filter(ClassroomSession.id == _parse_uuid(session_id))
+        .first()
+    )
     if session is None:
         raise HTTPException(status_code=404, detail="session 不存在")
-    if session.teacher_id != teacher_id:
-        raise HTTPException(status_code=403, detail="无权删除该课堂")
     db.delete(session)
     db.commit()
     return {"ok": True, "session_id": str(session.id)}
@@ -184,12 +173,11 @@ def delete_history_session(
 @router.get("/latest-preset")
 def get_latest_preset(
     db: Session = Depends(get_db),
-    teacher_id: str = Depends(get_current_teacher_id),
+    current_user: User = Depends(get_current_user),
 ):
     session = (
-        db.query(ClassroomSession)
+        _owned_session_query(db, current_user)
         .options(joinedload(ClassroomSession.lesson))
-        .filter(ClassroomSession.teacher_id == teacher_id)
         .order_by(ClassroomSession.created_at.desc())
         .first()
     )
@@ -202,20 +190,55 @@ def get_latest_preset(
     if atmosphere_raw == "活跃":
         atmosphere = "活跃互动型"
     elif atmosphere_raw == "沉闷":
-        atmosphere = "沉浸讲解型"
+        atmosphere = "沉浸讲授型"
     else:
         atmosphere = atmosphere_raw or "活跃互动型"
 
+    def _coerce_interview_answer(val, default):
+        if val is None:
+            return default
+        if isinstance(val, list):
+            cleaned = [str(x).strip() for x in val if str(x).strip()]
+            return cleaned if cleaned else default
+        s = str(val).strip()
+        if not s:
+            return default
+        for sep in ("、", ","):
+            if sep in s:
+                parts = [p.strip() for p in s.split(sep) if p.strip()]
+                if len(parts) > 1:
+                    return parts
+        return s
+
+    duration = prefs.get("duration") or "45 分钟"
+    grade = lesson.grade or "高一"
+    class_level = lesson.class_level or "普通班"
+    student_level = prefs.get("student_level")
+    lesson_goal = _coerce_interview_answer(
+        prefs.get("primary_goal"),
+        "技能掌握与方法运用",
+    )
+    practice_focus = _coerce_interview_answer(
+        prefs.get("breakthrough_focus"),
+        "提问质量与互动引导",
+    )
+    discipline_simulation_level = (
+        prefs.get("discipline_simulation_level") or "关闭（不触发）"
+    )
+    # 与前端问卷顺序一致，避免 Object 迭代顺序导致摘要里「课堂氛围」等错位
     interview_answers = {
-        "duration": prefs.get("duration") or "45 分钟",
-        "grade": lesson.grade or "高一",
-        "class_level": lesson.class_level or "普通班",
+        "duration": duration,
+        "grade": grade,
+        "class_level": class_level,
+        **({"student_level": str(student_level).strip()} if student_level else {}),
+        "lesson_goal": lesson_goal,
+        "practice_focus": practice_focus,
+        "discipline_simulation_level": discipline_simulation_level,
         "atmosphere": atmosphere,
-        "lesson_goal": prefs.get("primary_goal") or "技能掌握与方法运用",
-        "practice_focus": prefs.get("breakthrough_focus") or "提问质量与互动引导",
-        "discipline_simulation_level": prefs.get("discipline_simulation_level")
-        or "关闭（不触发）",
     }
+    subj = (lesson.subject or "").strip()
+    if subj:
+        interview_answers["subject"] = subj
 
     return {
         "has_preset": True,
@@ -227,14 +250,11 @@ def get_latest_preset(
 @router.get("/ability-profile")
 def get_ability_profile(
     db: Session = Depends(get_db),
-    teacher_id: str = Depends(get_current_teacher_id),
+    current_user: User = Depends(get_current_user),
 ):
     sessions = (
-        db.query(ClassroomSession)
-        .filter(
-            ClassroomSession.teacher_id == teacher_id,
-            ClassroomSession.report_payload.isnot(None),
-        )
+        _owned_session_query(db, current_user)
+        .filter(ClassroomSession.report_payload.isnot(None))
         .order_by(ClassroomSession.created_at.desc())
         .all()
     )
@@ -245,12 +265,16 @@ def get_ability_profile(
             "sections": [],
         }
 
-    session_ids = [str(s.id) for s in sessions]
+    session_ids = [str(session.id) for session in sessions]
     teacher_turn_counts = _load_teacher_turn_counts(db, sessions)
     decision_counts = _load_decision_event_counts(set(session_ids))
     per_session = [
-        _build_session_metrics(session=s, teacher_turn_counts=teacher_turn_counts, decision_counts=decision_counts)
-        for s in sessions
+        _build_session_metrics(
+            session=session,
+            teacher_turn_counts=teacher_turn_counts,
+            decision_counts=decision_counts,
+        )
+        for session in sessions
     ]
     recent3 = per_session[:3]
 
@@ -273,7 +297,7 @@ def get_ability_profile(
         "clarity": "讲解清晰度",
         "management": "课堂管理",
     }
-    sections_bucket: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    sections_bucket = defaultdict(list)
     for section_key, metric_key, label, unit, higher_better in metric_defs:
         all_val = _avg_metric(per_session, metric_key)
         recent_val = _avg_metric(recent3, metric_key)
@@ -316,7 +340,7 @@ def _load_teacher_turn_counts(
     db: Session,
     sessions: list[ClassroomSession],
 ) -> dict[str, int]:
-    ids = [s.id for s in sessions]
+    ids = [session.id for session in sessions]
     if not ids:
         return {}
     rows = (
@@ -332,9 +356,9 @@ def _load_teacher_turn_counts(
 
 
 def _load_decision_event_counts(session_ids: set[str]) -> dict[str, dict[str, int]]:
-    out: dict[str, dict[str, int]] = {
-        sid: {"ambiguous": 0, "misstatement": 0, "discipline": 0}
-        for sid in session_ids
+    out = {
+        session_id: {"ambiguous": 0, "misstatement": 0, "discipline": 0}
+        for session_id in session_ids
     }
     if not session_ids or not _DECISION_LOG_PATH.exists():
         return out
@@ -347,8 +371,8 @@ def _load_decision_event_counts(session_ids: set[str]) -> dict[str, dict[str, in
     }
 
     try:
-        with _DECISION_LOG_PATH.open("r", encoding="utf-8") as fh:
-            for line in fh:
+        with _DECISION_LOG_PATH.open("r", encoding="utf-8") as handle:
+            for line in handle:
                 text = line.strip()
                 if not text:
                     continue
@@ -356,8 +380,8 @@ def _load_decision_event_counts(session_ids: set[str]) -> dict[str, dict[str, in
                     row = json.loads(text)
                 except json.JSONDecodeError:
                     continue
-                sid = str(row.get("session_id") or "").strip()
-                if sid not in session_ids:
+                session_id = str(row.get("session_id") or "").strip()
+                if session_id not in session_ids:
                     continue
                 stage = str(row.get("stage") or "").strip()
                 if stage not in {"supervisor_decision", "supervisor_decision_normal_204"}:
@@ -369,9 +393,9 @@ def _load_decision_event_counts(session_ids: set[str]) -> dict[str, dict[str, in
                     or (supervisor_raw.get("dialog_state") if isinstance(supervisor_raw, dict) else "")
                     or ""
                 ).strip()
-                key = supervisor_state_map.get(state)
-                if key:
-                    out[sid][key] += 1
+                mapped = supervisor_state_map.get(state)
+                if mapped:
+                    out[session_id][mapped] += 1
     except OSError:
         return out
     return out
@@ -387,9 +411,9 @@ def _build_session_metrics(
     hard = payload.get("hard_stats") or {}
     scores = payload.get("scores") or {}
     question_types = payload.get("question_types") or []
-    sid = str(session.id)
-    teacher_turn_count = int(teacher_turn_counts.get(sid) or 0)
-    events = decision_counts.get(sid) or {}
+    session_id = str(session.id)
+    teacher_turn_count = int(teacher_turn_counts.get(session_id) or 0)
+    events = decision_counts.get(session_id) or {}
 
     open_count = 0.0
     total_questions = 0.0
@@ -406,9 +430,7 @@ def _build_session_metrics(
     mis_count, amb_count = _count_from_highlight_events(payload.get("highlight_events"))
     discipline_count = int(events.get("discipline") or 0)
     duration_min = float(
-        hard.get("total_duration_min")
-        or payload.get("duration_min")
-        or 0
+        hard.get("total_duration_min") or payload.get("duration_min") or 0
     )
     overtime = 1.0 if bool(payload.get("duration_overtime")) else 0.0
 
@@ -444,25 +466,16 @@ def _count_from_highlight_events(highlights: Any) -> tuple[int, int]:
 
 
 def _is_misstatement_prefix(text: str) -> bool:
-    t = str(text or "").strip()
-    normalized = t.replace("：", ":").lower().replace("\u3000", " ")
-    return (
-        t.startswith("知识点讲述错误")
-        or bool(re.search(r"触发\s*misstatement", normalized))
-    )
+    normalized = str(text or "").strip().replace("：", ":").lower().replace("\u3000", " ")
+    return normalized.startswith("知识点讲述错误") or bool(re.search(r"触发\s*misstatement", normalized))
 
 
 def _is_ambiguous_prefix(text: str) -> bool:
-    t = str(text or "").strip()
-    normalized = t.replace("：", ":").lower().replace("\u3000", " ")
-    return (
-        t.startswith("知识点讲述模糊")
-        or bool(re.search(r"触发\s*ambiguous", normalized))
-    )
+    normalized = str(text or "").strip().replace("：", ":").lower().replace("\u3000", " ")
+    return normalized.startswith("知识点讲述模糊") or bool(re.search(r"触发\s*ambiguous", normalized))
 
 
 def _rate_per_100(event_count: int, teacher_turn_count: int) -> float:
-    # 保护1：分母为0时，频率回落为0，避免报错与脏值。
     if teacher_turn_count <= 0:
         return 0.0
     return float(event_count) / float(teacher_turn_count) * 100.0
@@ -483,7 +496,6 @@ def _detect_trend(
     recent3_value: float,
     higher_is_better: bool,
 ) -> str:
-    # 保护2：基线过小时用 epsilon 防止波动被无限放大。
     epsilon = 0.1
     base = max(abs(all_value), epsilon)
     delta_abs = recent3_value - all_value
@@ -504,4 +516,3 @@ def _trend_tone(
         return "flat"
     improved = delta_abs > 0 if higher_is_better else delta_abs < 0
     return "good" if improved else "bad"
-

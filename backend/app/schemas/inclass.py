@@ -92,6 +92,7 @@ class InclassUtteranceResponse(BaseModel):
     student_states_digest: List[StudentStateItem] = Field(default_factory=list)
     preset_consumed: bool = False
     student_event: Optional[Any] = None
+    question_difficulty: Optional[int] = None  # 1-5，仅 questioning 时有值，5 最难
 
 
 class StudentStateResponse(BaseModel):

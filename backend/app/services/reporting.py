@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from app.models.lesson import ClassroomSession, SessionSegment, SessionTurn
+from app.services.lesson_runtime import format_display_datetime
 
 FILLER_LEXICON = [
     "然后",
@@ -153,7 +154,7 @@ def build_report_response(
         "lesson_topic": lesson_topic,
         "subject": subject,
         "class_info": class_info,
-        "created_at": started_at.strftime("%Y-%m-%d %H:%M"),
+        "created_at": format_display_datetime(started_at),
         "duration_min": duration_min,
         "target_duration_min": target_duration_min,
         "duration_overtime": duration_overtime,
@@ -390,6 +391,15 @@ def _overall_level_and_desc(overall_score: int, summary: str) -> tuple[str, str]
     return level, "课堂表现已生成，可查看各维度详情"
 
 
+def _prefs_scalar_text(val: Any) -> str:
+    """教学偏好里可能是 string 或 list（多选），统一为可读文本。"""
+    if val is None:
+        return ""
+    if isinstance(val, list):
+        return "、".join(str(x).strip() for x in val if str(x).strip())
+    return str(val).strip()
+
+
 def _build_custom_goal_feedback(
     *,
     lesson_json: dict[str, Any],
@@ -397,11 +407,12 @@ def _build_custom_goal_feedback(
     scores: dict[str, int],
 ) -> dict[str, Any] | None:
     prefs = lesson_json.get("teaching_preferences") or {}
-    goal = (
-        prefs.get("breakthrough_focus")
-        or lesson_json.get("custom_goal")
-        or lesson_json.get("teacher_context")
-    )
+    raw_focus = prefs.get("breakthrough_focus")
+    goal = _prefs_scalar_text(raw_focus) if raw_focus not in (None, "", []) else ""
+    if not goal:
+        goal = str(lesson_json.get("custom_goal") or "").strip()
+    if not goal:
+        goal = str(lesson_json.get("teacher_context") or "").strip()
     if not goal:
         return None
     if "互动" in goal or "提问" in goal:

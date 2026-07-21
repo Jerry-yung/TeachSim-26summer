@@ -6,9 +6,11 @@ from typing import Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
+from app.api.deps.auth import get_current_user
 from app.core.config import get_settings
 from app.db.session import get_db
-from app.models.lesson import Transcript
+from app.models.auth import User
+from app.models.lesson import Lesson, Transcript
 from app.schemas.lesson import TranscribeResponse
 from app.services.asr import transcribe_audio
 
@@ -21,6 +23,7 @@ MAX_ASR_BYTES = 20 * 1024 * 1024
 @router.post("/transcribe", response_model=TranscribeResponse)
 async def debug_transcribe(
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
     audio: UploadFile = File(
         ...,
         description="wav / mp3 / ogg（火山豆包极速版识别）",
@@ -56,6 +59,14 @@ async def debug_transcribe(
         except ValueError:
             # 前端可能传路由里的 session-xxx、mock id 等，调试接口不强制 UUID
             lid = None
+        else:
+            lesson = (
+                db.query(Lesson.id)
+                .filter(Lesson.id == lid, Lesson.owner_user_id == current_user.id)
+                .first()
+            )
+            if lesson is None:
+                raise HTTPException(status_code=404, detail="lesson 不存在")
 
     if settings.asr_debug_persist:
         try:
