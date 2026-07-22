@@ -1,7 +1,7 @@
 <template>
   <div class="report-view">
     <div v-if="!reportReady" class="report-loading">
-      {{ loadError || '报告加载中…' }}
+      {{ loadError || loadStatusText }}
     </div>
     <template v-else>
     <!-- Top bar：移除分数，改为定性总体评价 -->
@@ -243,6 +243,83 @@
         </div>
       </div>
 
+      <!-- 教姿教态时间轴（视觉分析可用时展示） -->
+      <div v-if="visualAnalysis && visualAnalysis.enabled" class="report-card visual-card">
+        <div class="card-header">
+          <span class="card-title">教姿教态分析</span>
+          <span class="card-badge">摄像头视觉</span>
+        </div>
+
+        <!-- 综合评分 + 维度条 -->
+        <div class="visual-summary">
+          <div class="visual-overall">
+            <span class="visual-score-val">{{ visualAnalysis.overall_presence_score }}</span>
+            <span class="visual-score-label">综合得分</span>
+          </div>
+          <div class="visual-dims">
+            <div v-for="(val, key) in visualAnalysis.dimension_scores" :key="key" class="visual-dim-row">
+              <span class="visual-dim-label">{{ visualDimLabel(key) }}</span>
+              <div class="visual-dim-bar-wrap">
+                <div class="visual-dim-bar-fill" :style="{ width: `${val}%`, background: visualDimColor(val) }"></div>
+              </div>
+              <span class="visual-dim-val">{{ val }}</span>
+            </div>
+          </div>
+          <p v-if="visualAnalysis.summary" class="visual-summary-text">{{ visualAnalysis.summary }}</p>
+        </div>
+
+        <!-- 时间轴（同时间点合并，仅首行显示查看片段） -->
+        <div v-if="visualAnalysis.timeline?.length" class="visual-timeline">
+          <div class="vtl-title">教态时间轴</div>
+          <div class="vtl-list">
+            <div
+              v-for="group in groupedVisualTimeline"
+              :key="`vtl-g-${group.time}-${group.observation_id}`"
+              class="vtl-group"
+            >
+              <span class="vtl-time">{{ group.time }}</span>
+              <div class="vtl-group-lines">
+                <div
+                  v-for="(ev, idx) in group.events"
+                  :key="`vtl-${group.observation_id}-${idx}-${ev.text}`"
+                  class="vtl-line"
+                  :class="ev.type"
+                >
+                  <div class="vtl-dot"></div>
+                  <span class="vtl-text">{{ ev.text }}</span>
+                  <button
+                    v-if="idx === 0 && group.has_clip"
+                    class="vtl-play-btn"
+                    @click="playVisualClip(group)"
+                    title="播放该片段"
+                  >
+                    ▶ 查看片段
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div v-else class="visual-no-events">本节课无教姿教态事件记录</div>
+      </div>
+
+      <!-- clip 播放器（弹出）-->
+      <transition name="fade">
+        <div v-if="playingClip" class="clip-overlay" @click.self="playingClip = null">
+          <div class="clip-modal">
+            <button class="clip-close" @click="playingClip = null">✕</button>
+            <p class="clip-ts">{{ playingClip.time }} — {{ playingClip.text }}</p>
+            <video
+              class="clip-video"
+              :src="playingClip.url"
+              controls
+              autoplay
+              playsinline
+            ></video>
+          </div>
+        </div>
+      </transition>
+
       <!-- 课堂关键节点 -->
       <div class="report-card">
         <div class="card-header">
@@ -300,6 +377,8 @@ import * as echarts from 'echarts'
 import { mockReport } from '@/mock/reportData.js'
 import { fetchReport, fetchRecent5Comparison } from '@/api/ai.js'
 
+import { getVisualClipUrl } from '@/api/visual'
+
 const router = useRouter()
 const route = useRoute()
 const radarContainer = ref(null)
@@ -307,8 +386,72 @@ const report = reactive(JSON.parse(JSON.stringify(mockReport)))
 let radarChart = null
 const reportReady = ref(false)
 const loadError = ref('')
+const loadStatusText = ref('报告加载中…')
 const selectedHighlightEvent = ref(null)
 const selectedEventKey = ref('')
+
+// 视觉分析
+const visualAnalysis = computed(() => report.visual_analysis || null)
+const playingClip = ref(null)
+
+const _VISUAL_DIM_LABELS = {
+  posture: '站姿体态',
+  gesture: '手势运用',
+  expression: '面部表情',
+  composure: '从容度',
+}
+function visualDimLabel(key) { return _VISUAL_DIM_LABELS[key] || key }
+function visualDimColor(val) {
+  if (val >= 85) return '#10B981'
+  if (val >= 70) return '#2563EB'
+  if (val >= 60) return '#F59E0B'
+  return '#EF4444'
+}
+function playVisualClip(groupOrEv) {
+  const sessionId = route.params.sessionId
+  const ev = groupOrEv?.clipEvent || groupOrEv
+  const url = getVisualClipUrl(sessionId, ev.observation_id)
+  playingClip.value = { url, time: ev.time, text: ev.text }
+}
+
+const groupedVisualTimeline = computed(() => {
+  const rows = Array.isArray(visualAnalysis.value?.timeline) ? visualAnalysis.value.timeline : []
+  const groups = []
+  const byKey = new Map()
+
+  rows.forEach((ev, idx) => {
+    const time = String(ev?.time || '00:00')
+    const obsId = String(ev?.observation_id || `${time}-${idx}`)
+    const key = `${time}::${obsId}`
+    const normalized = {
+      ...ev,
+      type: String(ev?.type || 'good').toLowerCase() === 'warning' ? 'warning' : 'good',
+      _key: idx,
+    }
+
+    if (!byKey.has(key)) {
+      const group = {
+        time,
+        observation_id: obsId,
+        events: [normalized],
+        clipEvent: normalized,
+        has_clip: Boolean(ev?.has_clip),
+      }
+      byKey.set(key, group)
+      groups.push(group)
+      return
+    }
+
+    const group = byKey.get(key)
+    group.events.push(normalized)
+    if (ev?.has_clip) {
+      group.has_clip = true
+      group.clipEvent = normalized
+    }
+  })
+
+  return groups
+})
 const recent5 = ref({ sample_size: 0, has_history: false, message: '', metrics: [] })
 const recent5Loading = ref(false)
 const recent5Error = ref('')
@@ -418,6 +561,7 @@ function updateChart() {
 async function loadReport() {
   reportReady.value = false
   loadError.value = ''
+  loadStatusText.value = '报告加载中…'
   const sessionId = String(route.params.sessionId || '')
   if (!sessionId || sessionId === 'mock-session-001') {
     reportReady.value = true
@@ -430,7 +574,8 @@ async function loadReport() {
     return
   }
   try {
-    const data = await fetchReport(sessionId)
+    loadStatusText.value = '正在生成完整报告（含教姿分析），请稍候…'
+    const data = await fetchReport(sessionId, { waitVisual: true })
     Object.assign(report, data)
     reportReady.value = true
     if (Array.isArray(report.highlight_events) && report.highlight_events.length) {
@@ -1238,5 +1383,137 @@ onUnmounted(() => {
   margin: 0;
   font-size: 12px;
   color: var(--color-text-muted);
+}
+
+/* ── 教姿教态视觉分析卡片 ── */
+.visual-card { }
+.visual-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 24px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+}
+.visual-overall {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 72px;
+}
+.visual-score-val {
+  font-size: 40px;
+  font-weight: 800;
+  color: #60A5FA;
+  line-height: 1;
+}
+.visual-score-label {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  margin-top: 4px;
+}
+.visual-dims { flex: 1; min-width: 200px; display: flex; flex-direction: column; gap: 8px; }
+.visual-dim-row {
+  display: flex; align-items: center; gap: 8px;
+}
+.visual-dim-label { font-size: 12px; color: var(--color-text-muted); width: 64px; flex-shrink: 0; }
+.visual-dim-bar-wrap { flex: 1; background: rgba(255,255,255,0.06); border-radius: 4px; height: 7px; overflow: hidden; }
+.visual-dim-bar-fill { height: 100%; border-radius: 4px; transition: width 0.6s ease; }
+.visual-dim-val { font-size: 12px; color: var(--color-text-secondary); width: 28px; text-align: right; }
+.visual-summary-text {
+  width: 100%; font-size: 13px; color: var(--color-text-secondary);
+  margin: 0; padding-top: 4px;
+}
+.visual-no-events { font-size: 13px; color: var(--color-text-muted); padding: 8px 0; }
+
+/* 教态时间轴 */
+.vtl-title { font-size: 13px; font-weight: 600; color: var(--color-text-secondary); margin-bottom: 12px; }
+.vtl-list { display: flex; flex-direction: column; gap: 0; }
+.vtl-group {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--color-border-light);
+}
+.vtl-group:last-child { border-bottom: none; }
+.vtl-time {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  width: 44px;
+  flex-shrink: 0;
+  padding-top: 6px;
+  font-variant-numeric: tabular-nums;
+}
+.vtl-group-lines {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.vtl-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+}
+.vtl-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-top: 4px;
+  background: var(--color-border);
+}
+.vtl-line.warning .vtl-dot { background: var(--color-amber); }
+.vtl-line.good .vtl-dot { background: var(--color-green); }
+.vtl-text { font-size: 13px; color: var(--color-text-secondary); line-height: 1.5; flex: 1; min-width: 0; }
+.vtl-line.warning .vtl-text { color: #92400E; }
+.vtl-line.good .vtl-text { color: #065F46; }
+.vtl-play-btn {
+  flex-shrink: 0;
+  align-self: flex-start;
+  margin-top: 1px;
+  background: rgba(37, 99, 235, 0.08);
+  border: 1px solid #2563EB;
+  color: #2563EB;
+  border-radius: 6px;
+  font-size: 11px;
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: background 0.2s;
+  white-space: nowrap;
+}
+.vtl-play-btn:hover { background: rgba(37, 99, 235, 0.15); }
+
+/* clip 播放弹窗 */
+.fade-enter-active, .fade-leave-active { transition: opacity 0.22s; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
+.clip-overlay {
+  position: fixed; inset: 0; z-index: 9000;
+  background: rgba(0,0,0,0.72);
+  display: flex; align-items: center; justify-content: center;
+  padding: 16px;
+}
+.clip-modal {
+  background: #0F172A;
+  border: 1px solid #1E3A5F;
+  border-radius: 14px;
+  padding: 20px;
+  max-width: 560px;
+  width: 100%;
+  position: relative;
+}
+.clip-close {
+  position: absolute; top: 12px; right: 14px;
+  background: transparent; border: none;
+  color: #64748B; font-size: 18px; cursor: pointer;
+}
+.clip-close:hover { color: #E2E8F0; }
+.clip-ts { font-size: 13px; color: #94A3B8; margin: 0 0 12px; }
+.clip-video {
+  width: 100%; border-radius: 8px;
+  background: #000; max-height: 320px;
 }
 </style>

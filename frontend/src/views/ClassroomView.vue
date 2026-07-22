@@ -142,6 +142,41 @@
       />
     </div>
 
+    <!-- ══ VISUAL: 隐藏摄像头预览 + canvas ══ -->
+    <video ref="visualVideoRef" style="display:none" playsinline muted autoplay></video>
+    <canvas ref="visualCanvasRef" style="display:none"></canvas>
+
+    <!-- ══ 教姿分析同意弹窗 ══ -->
+    <transition name="fade">
+      <div v-if="showVisualConsentModal" class="visual-consent-overlay" @click.self="onVisualConsentDecline">
+        <div class="visual-consent-modal">
+          <div class="vcm-icon">📷</div>
+          <h3 class="vcm-title">开启教姿教态分析</h3>
+          <p class="vcm-body">
+            本功能将通过摄像头采集您在授课时的肢体语言、手势与表情，
+            借助 AI 模型在课后生成<strong>教姿教态分析报告</strong>，帮助您优化教学呈现。
+          </p>
+          <ul class="vcm-list">
+            <li>每 15 秒采样约 3 帧图像及 2-3 秒短片段</li>
+            <li>数据仅用于本课程报告，保留 30 天后自动删除</li>
+            <li>不会录制全程完整视频，不会上传至第三方</li>
+            <li>您可随时在报告中关闭此功能</li>
+          </ul>
+          <p v-if="!visualCameraSupported" class="vcm-warning">
+            当前浏览器环境不支持摄像头（请使用 localhost 或 HTTPS 访问）。
+          </p>
+          <div class="vcm-actions">
+            <button
+              class="vcm-btn vcm-agree"
+              :disabled="!visualCameraSupported"
+              @click="onVisualConsentAgree"
+            >同意并开启摄像头</button>
+            <button class="vcm-btn vcm-decline" @click="onVisualConsentDecline">暂不开启</button>
+          </div>
+        </div>
+      </div>
+    </transition>
+
     <!-- ══ CONTROL BAR ══ -->
     <div class="ctrl-bar">
       <button
@@ -161,6 +196,7 @@
       </button>
       <div class="ctrl-hint">
         {{ isRecording ? '正在实时转写您的语音 · 学生将适时响应' : '准备好后点击开始授课' }}
+        <span v-if="visualEnabled" class="visual-on-badge">教姿分析已开启</span>
       </div>
     </div>
 
@@ -168,7 +204,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onUnmounted, watch, nextTick } from 'vue'
+import { ref, computed, onUnmounted, watch, nextTick, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useLessonStore } from '@/stores/lessonStore'
 import {
@@ -188,6 +224,7 @@ import {
   renderPptPdfPage,
   invalidatePptPdfCache,
 } from '@/utils/pptPdf.js'
+import { postVisualObservation } from '@/api/visual'
 
 const router  = useRouter()
 const route   = useRoute()
@@ -1851,10 +1888,15 @@ async function endClass() {
   clearStanding()
   activeDisciplineEvent.value = null
   clearAllDisciplinePoses()
+  // 停止视觉采样（会上传最后一段）
+  if (visualEnabled.value) {
+    await _stopVisualSampling().catch(() => {})
+  }
   router.push(`/report/${currentSessionId.value}`)
 }
 
 onUnmounted(() => {
+  _stopCamera()
   clearTimeout(pptPaintDebounceTimer)
   pptPaintDebounceTimer = null
   pdfResizeObserver?.disconnect()
@@ -1889,6 +1931,295 @@ onUnmounted(() => {
 startNewSegment()
 initPoseState()
 void recoverSessionContextIfNeeded()
+
+// ══════════════════════════════════════════════════════
+// ── 视觉分析模块（教姿教态）──
+// ══════════════════════════════════════════════════════
+
+const VISUAL_CONSENT_KEY = 'teachsim_visual_consent_v2'
+const VISUAL_WINDOW_SEC = 15
+const VISUAL_MOTION_THRESHOLD = 8        // canvas 帧差运动检测阈值
+
+// 同意弹窗
+const showVisualConsentModal = ref(false)
+const visualCameraSupported = ref(false)
+// 摄像头状态
+const visualEnabled = ref(false)
+const visualStream = ref(null)
+const visualVideoRef = ref(null)
+const visualCanvasRef = ref(null)
+
+// 内部状态
+let _visualWindowIndex = 0
+let _visualWindowTimer = null
+let _visualMediaRecorder = null
+let _visualRecordedChunks = []
+let _visualLastFrameData = null
+let _visualMotionFrameCount = 0
+let _visualActiveWindowStartSec = 0
+
+function _hasVisualConsent() {
+  try { return localStorage.getItem(VISUAL_CONSENT_KEY) === '1' } catch { return false }
+}
+function _saveVisualConsent() {
+  try { localStorage.setItem(VISUAL_CONSENT_KEY, '1') } catch {}
+}
+
+/** 初始化摄像头（仅摄像头流，无需显示给用户） */
+async function _initCamera() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
+      audio: false,
+    })
+    visualStream.value = stream
+    if (visualVideoRef.value) {
+      visualVideoRef.value.srcObject = stream
+      visualVideoRef.value.play().catch(() => {})
+    }
+    return true
+  } catch (e) {
+    console.warn('[Visual] 摄像头权限被拒绝或不可用', e?.message)
+    return false
+  }
+}
+
+/** 停止摄像头流和定时器（结束课堂时调用） */
+function _stopCamera() {
+  if (_visualWindowTimer) { clearInterval(_visualWindowTimer); _visualWindowTimer = null }
+  if (_visualMediaRecorder && _visualMediaRecorder.state !== 'inactive') {
+    try { _visualMediaRecorder.stop() } catch {}
+  }
+  _visualMediaRecorder = null
+  _visualRecordedChunks = []
+  if (visualStream.value) {
+    visualStream.value.getTracks().forEach(t => t.stop())
+    visualStream.value = null
+  }
+  visualEnabled.value = false
+}
+
+/** 暂停采样：上传当前窗口，但保持摄像头流（暂停授课时用） */
+async function _pauseVisualSampling() {
+  if (_visualWindowTimer) { clearInterval(_visualWindowTimer); _visualWindowTimer = null }
+  const clipBlob = await _stopRecording()
+  const f = _captureFrame()
+  const framesB64 = f ? [f] : []
+  if (framesB64.length || clipBlob) {
+    await _processVisualWindow(framesB64, clipBlob)
+  }
+}
+
+/**
+ * 简单运动检测：对比当前帧与上一帧像素均方差。
+ * 无 MediaPipe 依赖，依赖 canvas 像素差分。
+ * 返回 true 表示有足够运动（说明有人在画面里动作）。
+ */
+function _motionPrecheck() {
+  const video = visualVideoRef.value
+  const canvas = visualCanvasRef.value
+  if (!video || !canvas || !video.videoWidth) return false
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  canvas.width = 80
+  canvas.height = 60
+  ctx.drawImage(video, 0, 0, 80, 60)
+  const cur = ctx.getImageData(0, 0, 80, 60).data
+  if (!_visualLastFrameData) {
+    _visualLastFrameData = cur.slice()
+    return true
+  }
+  let diff = 0
+  for (let i = 0; i < cur.length; i += 4) {
+    diff += Math.abs(cur[i] - _visualLastFrameData[i])
+  }
+  const avgDiff = diff / (80 * 60)
+  _visualLastFrameData = cur.slice()
+  return avgDiff >= VISUAL_MOTION_THRESHOLD
+}
+
+/** 从 video 抓取一帧 base64 JPEG */
+function _captureFrame() {
+  const video = visualVideoRef.value
+  const canvas = visualCanvasRef.value
+  if (!video || !canvas || !video.videoWidth) return null
+  const ctx = canvas.getContext('2d')
+  canvas.width = 640
+  canvas.height = 480
+  ctx.drawImage(video, 0, 0, 640, 480)
+  const dataUrl = canvas.toDataURL('image/jpeg', 0.7)
+  return dataUrl.replace(/^data:image\/jpeg;base64,/, '')
+}
+
+/** 采集 3 帧（窗口开始 / 中间 / 结束前各一帧），每隔 VISUAL_WINDOW_SEC/3 秒取一次 */
+async function _collectWindowFrames() {
+  const frames = []
+  const interval = (VISUAL_WINDOW_SEC * 1000) / 3
+  for (let i = 0; i < 3; i++) {
+    const f = _captureFrame()
+    if (f) frames.push(f)
+    if (i < 2) await new Promise(r => setTimeout(r, interval))
+  }
+  return frames
+}
+
+/** 启动 MediaRecorder 录制 */
+function _startRecording() {
+  const stream = visualStream.value
+  if (!stream) return
+  _visualRecordedChunks = []
+  try {
+    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
+      ? 'video/webm;codecs=vp9'
+      : 'video/webm'
+    _visualMediaRecorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 400_000 })
+    _visualMediaRecorder.ondataavailable = e => {
+      if (e.data.size > 0) _visualRecordedChunks.push(e.data)
+    }
+    _visualMediaRecorder.start(500)
+  } catch (e) {
+    console.warn('[Visual] MediaRecorder 启动失败', e?.message)
+    _visualMediaRecorder = null
+  }
+}
+
+/** 停止录制并返回 Blob */
+function _stopRecording() {
+  return new Promise(resolve => {
+    if (!_visualMediaRecorder || _visualMediaRecorder.state === 'inactive') {
+      resolve(null); return
+    }
+    _visualMediaRecorder.onstop = () => {
+      const blob = _visualRecordedChunks.length
+        ? new Blob(_visualRecordedChunks, { type: 'video/webm' })
+        : null
+      _visualRecordedChunks = []
+      resolve(blob)
+    }
+    try { _visualMediaRecorder.stop() } catch { resolve(null) }
+  })
+}
+
+/** 处理一个 15s 窗口的上传 */
+async function _processVisualWindow(framesB64, clipBlob) {
+  const windowIdx = _visualWindowIndex++
+  const observationId = `${currentSessionId.value}_w${windowIdx}`
+  const windowStartSec = _visualActiveWindowStartSec
+
+  const precheckPassed = framesB64.length > 0
+
+  try {
+    await postVisualObservation({
+      sessionId: currentSessionId.value,
+      observationId,
+      segmentId: currentSegment?.id || null,
+      windowStartSec,
+      windowEndSec: windowStartSec + VISUAL_WINDOW_SEC,
+      slideNo: pptPage.value || null,
+      precheckPassed,
+      framesB64,
+      clip: clipBlob,
+      chatHistory: chatHistory.value.slice(-20),
+    })
+  } catch (e) {
+    console.warn('[Visual] 上传失败，跳过本窗口', e?.message)
+  }
+}
+
+/** 启动 15s 轮转采样 */
+async function _startVisualSampling() {
+  if (!visualEnabled.value || _visualWindowTimer) return
+  if (!visualStream.value) {
+    const ok = await _initCamera()
+    if (!ok) return
+  }
+  _visualActiveWindowStartSec = elapsedSec.value
+  _startRecording()
+
+  // 每 VISUAL_WINDOW_SEC 触发一次采集
+  _visualWindowTimer = setInterval(async () => {
+    if (!isRecording.value) return
+    const motionOk = _motionPrecheck()
+    if (!motionOk) { _visualMotionFrameCount++ }
+
+    let framesB64 = []
+    if (motionOk) {
+      const f1 = _captureFrame()
+      await new Promise(r => setTimeout(r, 1000))
+      const f2 = _captureFrame()
+      await new Promise(r => setTimeout(r, 1000))
+      const f3 = _captureFrame()
+      framesB64 = [f1, f2, f3].filter(Boolean)
+    } else {
+      const f = _captureFrame()
+      if (f) framesB64 = [f]
+    }
+
+    // 停止当前录制段
+    const clipBlob = await _stopRecording()
+
+    // 上传（后台异步，不阻塞采样循环）
+    _visualActiveWindowStartSec = elapsedSec.value
+    _processVisualWindow(framesB64, clipBlob).catch(() => {})
+
+    // 开始下一段录制
+    if (isRecording.value && visualEnabled.value) {
+      _startRecording()
+    }
+  }, VISUAL_WINDOW_SEC * 1000)
+}
+
+/** 停止视觉采样并上传最后一个窗口（结束课堂） */
+async function _stopVisualSampling() {
+  await _pauseVisualSampling()
+  _stopCamera()
+}
+
+/** 首次进入教室时检查同意状态 */
+function initVisualConsent() {
+  visualCameraSupported.value = Boolean(
+    window.isSecureContext &&
+      navigator.mediaDevices?.getUserMedia,
+  )
+
+  if (_hasVisualConsent()) {
+    if (!visualCameraSupported.value) {
+      console.warn('[Visual] 已同意教姿分析，但当前环境不支持摄像头')
+      return
+    }
+    void nextTick().then(async () => {
+      const ok = await _initCamera()
+      if (ok) visualEnabled.value = true
+    })
+    return
+  }
+
+  showVisualConsentModal.value = true
+  console.info('[Visual] 显示教姿分析同意弹窗')
+}
+
+async function onVisualConsentAgree() {
+  _saveVisualConsent()
+  showVisualConsentModal.value = false
+  const ok = await _initCamera()
+  if (ok) visualEnabled.value = true
+}
+
+function onVisualConsentDecline() {
+  showVisualConsentModal.value = false
+}
+
+// 当开始授课时同步开启视觉采样
+watch(isRecording, async (val) => {
+  if (val && visualEnabled.value) {
+    await _startVisualSampling()
+  } else if (!val && visualEnabled.value) {
+    await _pauseVisualSampling()
+  }
+})
+
+onMounted(() => {
+  void nextTick().then(() => initVisualConsent())
+})
 </script>
 
 <style scoped>
@@ -2198,4 +2529,88 @@ void recoverSessionContextIfNeeded()
 .slide-up-enter-active, .slide-up-leave-active { transition: all 0.35s ease; }
 .slide-up-enter-from { opacity: 0; transform: translateY(12px); }
 .slide-up-leave-to   { opacity: 0; transform: translateY(-6px); }
+
+.fade-enter-active, .fade-leave-active { transition: opacity 0.25s; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
+
+/* ── 视觉同意弹窗 ── */
+.visual-consent-overlay {
+  position: fixed; inset: 0; z-index: 9999;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex; align-items: center; justify-content: center;
+  padding: 16px;
+}
+.visual-consent-modal {
+  background: #0F172A;
+  border: 1px solid #1E3A5F;
+  border-radius: 16px;
+  padding: 32px 28px;
+  max-width: 440px;
+  width: 100%;
+  box-shadow: 0 24px 64px rgba(0,0,0,0.6);
+}
+.vcm-icon { font-size: 36px; text-align: center; margin-bottom: 12px; }
+.vcm-title {
+  font-size: 20px; font-weight: 700;
+  color: #E2E8F0; text-align: center;
+  margin: 0 0 12px;
+}
+.vcm-body {
+  font-size: 14px; color: #94A3B8;
+  line-height: 1.6; margin: 0 0 16px;
+}
+.vcm-body strong { color: #E2E8F0; }
+.vcm-list {
+  list-style: none; padding: 0; margin: 0 0 24px;
+}
+.vcm-list li {
+  font-size: 13px; color: #64748B;
+  padding: 4px 0 4px 20px;
+  position: relative;
+}
+.vcm-list li::before {
+  content: '✓'; position: absolute; left: 0;
+  color: #22D3EE; font-weight: 700;
+}
+.vcm-actions {
+  display: flex; flex-direction: column; gap: 10px;
+}
+.vcm-btn {
+  padding: 12px 20px; border-radius: 10px;
+  font-size: 14px; font-weight: 600;
+  cursor: pointer; border: none; transition: opacity 0.2s;
+}
+.vcm-btn:hover { opacity: 0.85; }
+.vcm-agree {
+  background: linear-gradient(135deg, #2563EB, #1D4ED8);
+  color: #fff;
+}
+.vcm-decline {
+  background: transparent;
+  border: 1px solid #334155;
+  color: #64748B;
+}
+.vcm-warning {
+  font-size: 13px;
+  color: #FBBF24;
+  background: rgba(251, 191, 36, 0.08);
+  border: 1px solid rgba(251, 191, 36, 0.25);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 0 0 16px;
+}
+.vcm-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.visual-on-badge {
+  display: inline-block;
+  margin-left: 10px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: #22D3EE;
+  border: 1px solid rgba(34, 211, 238, 0.35);
+  background: rgba(34, 211, 238, 0.08);
+}
 </style>

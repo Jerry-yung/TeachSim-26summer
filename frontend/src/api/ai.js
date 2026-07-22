@@ -201,8 +201,10 @@ export function postStudentReply(payload) {
 }
 
 export function fetchReport(sessionId, options = {}) {
-  const force = options?.force === true
-  const suffix = force ? '?force=true' : ''
+  const q = new URLSearchParams()
+  if (options?.force === true) q.set('force', 'true')
+  if (options?.waitVisual !== false) q.set('wait_visual', 'true')
+  const suffix = q.toString() ? `?${q.toString()}` : ''
   return backendFetch(`/api/report/${encodeURIComponent(sessionId)}${suffix}`)
 }
 

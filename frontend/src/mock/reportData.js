@@ -20,6 +20,7 @@ const _scores = {
   interaction_quality: 70,
   pacing: 72,
   language_appropriateness: 80,
+  teaching_presence: 74,
 }
 
 export const mockReport = {
@@ -27,7 +28,7 @@ export const mockReport = {
   lesson_topic: '《六国论》',
   subject: '高中语文 · 古文',
   class_info: '高二 · 重点班',
-  created_at: '2026-07-21 14:32',
+  created_at: '2026-07-22 14:32',
   duration_min: 42,
 
   // 定性总体评价（替代综合分数）
@@ -43,6 +44,7 @@ export const mockReport = {
       interaction_quality: '互动质量',
       pacing: '课堂节奏',
       language_appropriateness: '语言表达',
+      teaching_presence: '教姿教态',
     }[key],
     _val: val,         // 仅用于雷达图渲染，不在 UI 上显示
     level: toLevel(val),
@@ -85,6 +87,66 @@ export const mockReport = {
 
   improvement_suggestions:
     '本节课教案贴合度高，知识点讲授准确，整体表现良好。主要改进方向：\n\n① **互动质量有待提升**：全程仅有 15 个学生互动片段，封闭式提问占比偏高（40%），建议增加 2-3 个开放性讨论题，引导学生主动思考。\n\n② **课堂节奏偏快**：部分核心知识点（如"赂秦"论点的辩证分析）停留时间不足 2 分钟，学生可能尚未充分消化。建议在重点处留白等待，提问等待时间均值仅 1.2 秒，低于推荐的 3 秒。\n\n③ **口头禅控制**："然后"出现 14 次、"对不对"12 次，建议有意识地替换为更有变化的过渡语。',
+
+  // 视觉分析（Mock 示例）
+  visual_analysis: {
+    enabled: true,
+    overall_presence_score: 74,
+    dimension_scores: {
+      posture: 76,
+      gesture: 65,
+      expression: 78,
+      composure: 72,
+    },
+    affect_avg: {
+      nervousness: 0.32,
+      anxiety: 0.28,
+      naturalness: 0.70,
+    },
+    summary: '整体教态较自然，手势运用偏少；讲解重点时表情较为严肃，建议适当增加微笑与眼神交流。',
+    window_count: 6,
+    timeline: [
+      {
+        time: '08:15',
+        class_elapsed_sec: 495,
+        window_start_sec: 480,
+        window_end_sec: 495,
+        slide_no: 3,
+        type: 'warning',
+        text: '讲解"赂秦"论点时双臂交叉，肢体语言略显封闭',
+        affect: { nervousness: 0.45, naturalness: 0.55 },
+        observation_id: 'mock-session-001_w2',
+        has_clip: false,
+        has_thumb: false,
+      },
+      {
+        time: '19:45',
+        class_elapsed_sec: 1185,
+        window_start_sec: 1170,
+        window_end_sec: 1185,
+        slide_no: 6,
+        type: 'good',
+        text: '互动提问时面向学生，表情亲切自然，肢体语言开放',
+        affect: { nervousness: 0.18, naturalness: 0.82 },
+        observation_id: 'mock-session-001_w5',
+        has_clip: false,
+        has_thumb: false,
+      },
+      {
+        time: '27:20',
+        class_elapsed_sec: 1640,
+        window_start_sec: 1620,
+        window_end_sec: 1635,
+        slide_no: 8,
+        type: 'warning',
+        text: '长时间侧身对黑板，减少了与学生的目光接触',
+        affect: { nervousness: 0.28, naturalness: 0.65 },
+        observation_id: 'mock-session-001_w7',
+        has_clip: false,
+        has_thumb: false,
+      },
+    ],
+  },
 
   is_improved: true,
   history_comparison:
