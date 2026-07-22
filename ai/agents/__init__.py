@@ -4,6 +4,7 @@ from .inclass_segment_eval_llm import InclassSegmentEvalLLM
 from .inclass_supervisor_agent import InclassSupervisorAgent
 from .inclass_student_agent import InclassStudentAgent
 from .postclass_report_llm import PostclassReportLLM
+from .inclass_visual_obs_llm import InclassVisualObsLLM
 
 __all__ = [
     "PreclassPptLLM",
@@ -11,4 +12,5 @@ __all__ = [
     "InclassSupervisorAgent",
     "InclassStudentAgent",
     "PostclassReportLLM",
+    "InclassVisualObsLLM",
 ]

@@ -30,6 +30,7 @@ from agents import (
     InclassSupervisorAgent,
     InclassStudentAgent,
     PostclassReportLLM,
+    InclassVisualObsLLM,
 )
 
 # ============ 配置 ============
@@ -485,6 +486,43 @@ def v2_postclass_report_generate(body: ReportGenerateRequest):
             lesson_json=body.lesson_json,
             segment_evals=body.segment_evals,
         )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=make_error_response("AI_LLM_ERROR", str(e)),
+        )
+
+
+# ============ 视觉分析接口 ============
+
+class VisualObsRequest(BaseModel):
+    observation_id: str
+    session_id: str = ""
+    segment_id: str = ""
+    window_start_sec: int = 0
+    window_end_sec: int = 15
+    slide_no: Optional[int] = None
+    frames_b64: List[str]           # 1-3 张 JPEG base64
+    chat_history: List[Dict[str, Any]] = []
+
+
+_visual_obs_llm = InclassVisualObsLLM()
+
+
+@app.post("/ai/v2/inclass/visual/analyze")
+def v2_inclass_visual_analyze(body: VisualObsRequest):
+    """课中教姿教态 VLM 分析（每 15 秒窗口一次，异步调用）。"""
+    try:
+        result = _visual_obs_llm.run(
+            observation_id=body.observation_id,
+            frames_b64=body.frames_b64,
+            chat_history=body.chat_history,
+            window_start_sec=body.window_start_sec,
+            window_end_sec=body.window_end_sec,
+            segment_id=body.segment_id,
+            slide_no=body.slide_no,
+        )
+        return result
     except Exception as e:
         raise HTTPException(
             status_code=500,

@@ -20,9 +20,20 @@ _HTTP_SYNC = httpx.Client(trust_env=False, timeout=_HTTP_TIMEOUT)
 _HTTP_ASYNC = httpx.AsyncClient(trust_env=False, timeout=_HTTP_TIMEOUT)
 
 
+def _build_vision_model(*, model: str, base_url: str, api_key: str) -> ChatOpenAI:
+    """视觉模型专用：不传 enable_thinking（Qwen3-VL 等会 400）。"""
+    return ChatOpenAI(
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
+        http_client=_HTTP_SYNC,
+        http_async_client=_HTTP_ASYNC,
+    )
+
+
 def _build_chat_model(*, model: str, base_url: str, api_key: str) -> ChatOpenAI:
     """统一创建 ChatOpenAI，并关闭 thinking，避免 tool-calling 协议冲突。
-    
+
     注意：部分模型（如 Moonshot、ECNU）对 temperature 有限制，
     这里不设置 temperature，使用模型默认值。
     """
@@ -92,8 +103,17 @@ class LLM_siliconflow_qwen:
 
 class LLM_siliconflow_vision:
     def __init__(self):
-        self.model = _build_chat_model(
-            model="zai-org/GLM-4.6V",
+        self.model = _build_vision_model(
+            model=os.getenv("VISUAL_VLM_FALLBACK_MODEL", "Qwen/Qwen3-VL-32B-Instruct"),
+            api_key=os.getenv("SILICONFLOW_API_KEY", ""),
+            base_url="https://api.siliconflow.cn/v1",
+        )
+
+class LLM_qwen_vl:
+    """Qwen3-VL-8B-Instruct：课中教姿教态主 VLM（SiliconFlow 当前可用；Qwen2.5-VL-7B 已下线）。"""
+    def __init__(self):
+        self.model = _build_vision_model(
+            model=os.getenv("VISUAL_VLM_MODEL", "Qwen/Qwen3-VL-8B-Instruct"),
             api_key=os.getenv("SILICONFLOW_API_KEY", ""),
             base_url="https://api.siliconflow.cn/v1",
         )
@@ -119,3 +139,8 @@ report_llm = LLM_deepseek()
 
 # 多模态 / 视觉：PPT 配图解析等（需在 .env 配置 MOONSHOT_API_KEY）
 vlm = LLM_moonshot_kimi()
+
+# 教姿教态主 VLM（需在 .env 配置 SILICONFLOW_API_KEY）
+visual_vlm = LLM_qwen_vl()
+# 疑难复核 VLM（confidence < 0.6 时启用，同样走 SiliconFlow）
+visual_vlm_fallback = LLM_siliconflow_vision()

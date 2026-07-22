@@ -32,3 +32,4 @@ npm run dev
 - Tag：`week-0720-ai` — AI：同步 0720 里程碑版本，巩固课前解析 / 课中主控与学生互动 / 课后报告完整链路
 - Tag：`week-0721-frontend` — 前端：强化课中 ASR 续听与 MiniMax TTS 播完联动（讯飞转写去重/噪声过滤与断连软恢复，课堂发言态同步）
 - Tag：`week-0722-frontend` — 前端：接入课中视觉教态采集与报告展示（visual API、教姿采样/clip 上传、报告教态分析）
+- Tag：`week-0722-ai` — AI：新增课中教姿教态视觉分析（`InclassVisualObsLLM`、`/ai/v2/inclass/visual/analyze`，主/复核 VLM）
