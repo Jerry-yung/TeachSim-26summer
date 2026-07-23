@@ -86,9 +86,24 @@ class AIClient:
     async def generate_report(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._post_json("/ai/v2/postclass/report/generate", payload)
 
-    async def _post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async def visual_analyze(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """调用 AI VLM 分析单个教姿教态观察窗口（多图 VLM 耗时较长）。"""
+        return await self._post_json(
+            "/ai/v2/inclass/visual/analyze",
+            payload,
+            timeout_s=max(self.settings.ai_timeout_s, 120.0),
+        )
+
+    async def _post_json(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        timeout_s: float | None = None,
+    ) -> dict[str, Any]:
         url = f"{self.base_url}{path}"
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        timeout = httpx.Timeout(timeout_s if timeout_s is not None else self.settings.ai_timeout_s)
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
             try:
                 response = await client.post(url, json=payload)
             except httpx.HTTPError as exc:

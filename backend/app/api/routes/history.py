@@ -189,8 +189,16 @@ def get_latest_preset(
     atmosphere_raw = str(lesson.atmosphere or "").strip()
     if atmosphere_raw == "活跃":
         atmosphere = "活跃互动型"
+    elif atmosphere_raw == "均衡":
+        atmosphere = "均衡参与型"
     elif atmosphere_raw == "沉闷":
-        atmosphere = "沉浸讲授型"
+        atmosphere = "沉浸讲解型"
+    elif atmosphere_raw in ("沉浸讲授型", "严谨讨论型", "练习主导型"):
+        atmosphere = {
+            "沉浸讲授型": "沉浸讲解型",
+            "严谨讨论型": "活跃互动型",
+            "练习主导型": "活跃互动型",
+        }[atmosphere_raw]
     else:
         atmosphere = atmosphere_raw or "活跃互动型"
 

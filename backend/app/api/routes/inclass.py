@@ -26,6 +26,11 @@ from app.schemas.inclass import (
     StudentStateResponse,
 )
 from app.services.ai_client import AIClient, AIServiceError
+from app.services.hand_raise_policy import (
+    normalize_atmosphere,
+    normalize_question_difficulty,
+    select_questioning_hand_raises,
+)
 from app.services.lesson_runtime import copy_slide_without_none, parse_iso_datetime
 from app.services.student_state import (
     build_called_student_digest,
@@ -847,7 +852,6 @@ async def post_utterance(
     trigger_reason = result.get("trigger_reason", "none")
     target_type = result.get("target_student_type")
     student_event = result.get("student_event")
-    question_difficulty = result.get("question_difficulty")
 
     play_mode = "immediate"
     raised_hand_ids: list[str] = []
@@ -856,15 +860,22 @@ async def post_utterance(
     # 4.6 根据 dialog_state 处理状态与响应格式
     if dialog_state == "questioning" and should_trigger:
         play_mode = "on_call_name"
-        # 随机挑 2 个同学举手
-        all_students = [
-            s.student_id
-            for s in session_students
-            if (not s.is_sleeping and not s.is_whispering)
-        ]
-        rng = __import__("random").Random(str(session.id) + interaction_round_id)
-        rng.shuffle(all_students)
-        raised_hand_ids = all_students[:2]
+        lesson_atmosphere = session.lesson.atmosphere if session.lesson else ""
+        atmosphere_tier = normalize_atmosphere(lesson_atmosphere)
+        raw_difficulty = result.get("question_difficulty")
+        difficulty_band = normalize_question_difficulty(raw_difficulty)
+        if raw_difficulty is None:
+            logging.getLogger(__name__).info(
+                "questioning 未返回 question_difficulty，使用 medium；session=%s",
+                session.id,
+            )
+        raised_hand_ids = select_questioning_hand_raises(
+            session_id=session.id,
+            interaction_round_id=interaction_round_id,
+            students=session_students,
+            atmosphere=atmosphere_tier,
+            difficulty_band=difficulty_band,
+        )
         if raised_hand_ids:
             set_hand_raised(session.id, raised_hand_ids, db)
         preset_for_id = None
@@ -939,7 +950,6 @@ async def post_utterance(
         student_states_digest=build_student_states_digest(session_students),
         preset_consumed=False,
         student_event=student_event,
-        question_difficulty=question_difficulty if dialog_state == "questioning" else None,
     )
     _log_decision_snapshot(
         session_id=session.id,

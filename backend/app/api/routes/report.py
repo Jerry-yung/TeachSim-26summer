@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -11,12 +13,24 @@ from sqlalchemy.orm import Session, joinedload
 from app.api.deps.auth import get_current_user
 from app.db.session import get_db
 from app.models.auth import User
-from app.models.lesson import ClassroomSession, Lesson, SessionSegment, SessionTurn
+from app.models.lesson import (
+    ClassroomSession,
+    Lesson,
+    SessionSegment,
+    SessionTurn,
+    SessionVisualObservation,
+)
 from app.services.ai_client import AIClient, AIServiceError
 from app.services.lesson_runtime import build_min_lesson_payload, format_display_datetime
-from app.services.reporting import build_ai_report_fallback, build_report_response
+from app.services.reporting import (
+    build_ai_report_fallback,
+    build_report_response,
+    merge_visual_into_report_payload,
+)
 
 router = APIRouter(tags=["report"])
+_VISUAL_VLM_WAIT_TIMEOUT_S = 120.0
+_VISUAL_VLM_POLL_INTERVAL_S = 2.0
 
 
 def _parse_uuid(raw: str) -> uuid.UUID:
@@ -43,10 +57,58 @@ def _get_owned_session(
     )
 
 
+def _count_visual_observations(db: Session, session_id: uuid.UUID) -> int:
+    return (
+        db.query(SessionVisualObservation)
+        .filter(SessionVisualObservation.session_id == session_id)
+        .count()
+    )
+
+
+def _count_visual_pending(db: Session, session_id: uuid.UUID) -> int:
+    return (
+        db.query(SessionVisualObservation)
+        .filter(
+            SessionVisualObservation.session_id == session_id,
+            SessionVisualObservation.vlm_status == "pending",
+        )
+        .count()
+    )
+
+
+async def _wait_for_visual_vlm(
+    db: Session,
+    session_id: uuid.UUID,
+    *,
+    timeout_s: float = _VISUAL_VLM_WAIT_TIMEOUT_S,
+) -> bool:
+    """等待本课全部视觉窗口 VLM 分析结束。无视觉记录时立即返回 True。"""
+    if _count_visual_observations(db, session_id) == 0:
+        return True
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if _count_visual_pending(db, session_id) == 0:
+            return True
+        await asyncio.sleep(_VISUAL_VLM_POLL_INTERVAL_S)
+        db.expire_all()
+    return False
+
+
+def _query_visual_observations(db: Session, session_id: uuid.UUID) -> list[SessionVisualObservation]:
+    return (
+        db.query(SessionVisualObservation)
+        .filter(SessionVisualObservation.session_id == session_id)
+        .order_by(SessionVisualObservation.window_start_sec.asc())
+        .all()
+    )
+
+
 @router.get("/report/{session_id}")
 async def get_report(
     session_id: str,
     force_refresh: bool = Query(False, alias="force"),
+    wait_for_visual: bool = Query(True, alias="wait_visual"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -54,11 +116,27 @@ async def get_report(
     if session is None:
         raise HTTPException(status_code=404, detail="session 不存在")
 
+    sid = session.id
+    visual_wait_timed_out = False
+    if wait_for_visual and _count_visual_observations(db, sid) > 0:
+        visual_wait_timed_out = not await _wait_for_visual_vlm(db, sid)
+
     if session.report_payload and not force_refresh:
-        payload = dict(session.report_payload)
+        visual_obs = _query_visual_observations(db, sid)
+        payload = merge_visual_into_report_payload(
+            dict(session.report_payload),
+            visual_obs,
+            session,
+        )
         anchor = session.started_at or session.created_at
         if anchor is not None:
             payload["created_at"] = format_display_datetime(anchor)
+        if visual_wait_timed_out:
+            payload["visual_processing_timed_out"] = True
+        prev_visual = (session.report_payload or {}).get("visual_analysis") or {}
+        if payload.get("visual_analysis") != prev_visual:
+            session.report_payload = payload
+            db.commit()
         return payload
 
     if session.ended_at is None:
@@ -79,6 +157,8 @@ async def get_report(
         .all()
     )
     segment_evals = [row.eval_payload for row in segments if row.eval_payload]
+
+    visual_obs = _query_visual_observations(db, sid)
 
     lesson_json = session.lesson.lesson_payload or build_min_lesson_payload(
         grade=session.lesson.grade,
@@ -103,7 +183,10 @@ async def get_report(
         segments=segments,
         lesson_json=lesson_json,
         ai_report=ai_report,
+        visual_obs=visual_obs,
     )
+    if visual_wait_timed_out:
+        report_payload["visual_processing_timed_out"] = True
     session.report_payload = report_payload
     db.commit()
     return report_payload

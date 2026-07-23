@@ -5,8 +5,10 @@ from app.models.lesson import (
     LessonFile,
     SessionSegment,
     SessionTurn,
+    SessionVisualObservation,
     Transcript,
 )
+from app.models.session_student import SessionStudent
 from app.models.teacher import Teacher
 
 __all__ = [
@@ -19,5 +21,7 @@ __all__ = [
     "Transcript",
     "SessionTurn",
     "SessionSegment",
+    "SessionVisualObservation",
+    "SessionStudent",
     "Teacher",
 ]

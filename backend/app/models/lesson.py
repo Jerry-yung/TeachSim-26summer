@@ -105,6 +105,9 @@ class ClassroomSession(Base):
     students: Mapped[List["SessionStudent"]] = relationship(
         back_populates="session", cascade="all, delete-orphan"
     )
+    visual_observations: Mapped[List["SessionVisualObservation"]] = relationship(
+        back_populates="session", cascade="all, delete-orphan"
+    )
 
 
 class Transcript(Base):
@@ -181,3 +184,37 @@ class SessionSegment(Base):
     )
 
     session: Mapped[ClassroomSession] = relationship(back_populates="segments")
+
+
+class SessionVisualObservation(Base):
+    """课中每 15 秒视觉分析窗口记录（教姿教态）。"""
+    __tablename__ = "session_visual_observations"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sessions.id", ondelete="CASCADE"), index=True
+    )
+    observation_id: Mapped[str] = mapped_column(String(128), index=True)
+    segment_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
+    window_start_sec: Mapped[int] = mapped_column(Integer)
+    window_end_sec: Mapped[int] = mapped_column(Integer)
+    slide_no: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # 上传的 clip/缩略图存储路径（相对于 upload_dir）
+    clip_path: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    thumbnail_path: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    # VLM 分析状态：pending / done / failed / skipped
+    vlm_status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    # VLM 结构化输出
+    vlm_payload: Mapped[Optional[Dict]] = mapped_column(JSONB, nullable=True)
+    # 预检是否通过（MediaPipe 通过才有 VLM 结果）
+    precheck_passed: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    session: Mapped["ClassroomSession"] = relationship(back_populates="visual_observations")

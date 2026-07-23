@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from app.models.lesson import ClassroomSession, SessionSegment, SessionTurn
+from app.models.lesson import ClassroomSession, SessionSegment, SessionTurn, SessionVisualObservation
 from app.services.lesson_runtime import format_display_datetime
 
 FILLER_LEXICON = [
@@ -94,12 +94,236 @@ def build_ai_report_fallback(
     }
 
 
+def build_visual_summary_text(visual_analysis: dict[str, Any]) -> str:
+    """把 visual_analysis 摘要转为一段人类可读文本，供 LLM 课后报告 prompt 使用。"""
+    if not visual_analysis or not visual_analysis.get("enabled"):
+        return ""
+    score = visual_analysis.get("overall_presence_score", 0)
+    summary = visual_analysis.get("summary") or ""
+    worst_issues: list[str] = []
+    for ev in (visual_analysis.get("timeline") or []):
+        if ev.get("type") == "warning":
+            worst_issues.append(str(ev.get("text") or ""))
+        if len(worst_issues) >= 3:
+            break
+    issues_text = "；".join(worst_issues) if worst_issues else "无明显问题"
+    return (
+        f"【教姿教态视觉分析】综合得分 {score}（满分100）。{summary}"
+        f" 主要问题：{issues_text}。"
+    )
+
+
+def _visual_payload_usable(payload: dict[str, Any]) -> bool:
+    if not payload or payload.get("skip_reason"):
+        return False
+    presence = int(payload.get("teaching_presence_score") or 0)
+    if presence > 0:
+        return True
+    for key in ("posture", "gesture", "expression"):
+        if int((payload.get(key) or {}).get("score") or 0) > 0:
+            return True
+    return False
+
+
+def _visual_window_weight(conf: float, window_sec: int) -> float:
+    """居家试讲：低 confidence 仍参与计分，仅降低权重。"""
+    if conf >= 0.55:
+        factor = 1.0
+    elif conf >= 0.25:
+        factor = 0.65
+    elif conf >= 0.15:
+        factor = 0.35
+    else:
+        factor = 0.0
+    return window_sec * factor
+
+
+_FILLER_PATTERNS = (
+    "居家", "线上场景", "模拟授课", "继续保持", "整体自然", "出镜正常",
+    "教师出镜", "保持自然", "适度手势",
+)
+
+
+def _is_filler_text(text: str) -> bool:
+    return any(p in text for p in _FILLER_PATTERNS)
+
+
+def _synthetic_timeline_events(payload: dict[str, Any]) -> list[dict[str, str]]:
+    events: list[dict[str, str]] = []
+    for key, label in (("posture", "教姿"), ("gesture", "手势"), ("expression", "表情")):
+        dim = payload.get(key) or {}
+        for issue in dim.get("issues") or []:
+            text = str(issue).strip()
+            if text and not _is_filler_text(text):
+                events.append({"type": "warning", "text": f"{label}：{text}"})
+    gaze_issue = str((payload.get("gaze") or {}).get("issue") or "").strip()
+    if gaze_issue and not _is_filler_text(gaze_issue):
+        events.append({"type": "warning", "text": f"视线：{gaze_issue}"})
+    return events
+
+
+def _append_visual_timeline_events(
+    timeline: list[dict[str, Any]],
+    obs: SessionVisualObservation,
+    payload: dict[str, Any],
+) -> None:
+    affect = payload.get("affect") or {}
+    start_sec = obs.window_start_sec
+    time_label = f"{start_sec // 60:02d}:{start_sec % 60:02d}"
+    events = payload.get("highlights") or []
+    if not events:
+        events = _synthetic_timeline_events(payload)
+    for ev in events:
+        ev_type = str(ev.get("type") or "good")
+        if ev_type not in ("good", "warning"):
+            ev_type = "good"
+        ev_text = str(ev.get("text") or "")
+        if not ev_text or _is_filler_text(ev_text):
+            continue
+        timeline.append({
+            "time": time_label,
+            "class_elapsed_sec": start_sec,
+            "window_start_sec": obs.window_start_sec,
+            "window_end_sec": obs.window_end_sec,
+            "slide_no": obs.slide_no,
+            "segment_id": obs.segment_id,
+            "type": ev_type,
+            "text": ev_text,
+            "affect": {
+                "nervousness": float(affect.get("nervousness") or 0),
+                "naturalness": float(affect.get("naturalness") or 0),
+            },
+            "observation_id": obs.observation_id,
+            "has_clip": bool(obs.clip_path),
+            "has_thumb": bool(obs.thumbnail_path),
+        })
+
+
+def _build_visual_analysis(
+    visual_obs: list[SessionVisualObservation],
+    started_at: Any,
+    session_id: str,
+) -> dict[str, Any]:
+    """聚合全课视觉观察窗口，生成 visual_analysis 字段（用于报告 + 雷达图）。"""
+    done_obs = [o for o in visual_obs if o.vlm_status == "done" and o.vlm_payload]
+    if not done_obs:
+        return {"enabled": False, "overall_presence_score": 0, "timeline": []}
+
+    # 时间加权平均（居家试讲：conf≥0.55 全权，0.25–0.55 降权，<0.15 跳过）
+    total_w = 0.0
+    w_posture = w_gesture = w_expression = 0.0
+    w_nervousness = w_anxiety = w_naturalness = 0.0
+
+    timeline: list[dict[str, Any]] = []
+
+    for obs in sorted(done_obs, key=lambda o: o.window_start_sec):
+        p = obs.vlm_payload or {}
+        if not _visual_payload_usable(p):
+            continue
+
+        conf = float(p.get("confidence") or 0.0)
+        window_sec = max(obs.window_end_sec - obs.window_start_sec, 1)
+        weight = _visual_window_weight(conf, window_sec)
+        if weight <= 0:
+            _append_visual_timeline_events(timeline, obs, p)
+            continue
+
+        posture_score = float((p.get("posture") or {}).get("score") or 0)
+        gesture_score = float((p.get("gesture") or {}).get("score") or 0)
+        expr_score    = float((p.get("expression") or {}).get("score") or 0)
+        affect        = p.get("affect") or {}
+
+        w_posture     += posture_score * weight
+        w_gesture     += gesture_score * weight
+        w_expression  += expr_score    * weight
+        w_nervousness += float(affect.get("nervousness") or 0) * weight
+        w_anxiety     += float(affect.get("anxiety") or 0) * weight
+        w_naturalness += float(affect.get("naturalness") or 0) * weight
+        total_w       += weight
+
+        _append_visual_timeline_events(timeline, obs, p)
+
+    # 兜底：有有效窗口但 confidence 全过低时，按 teaching_presence_score 计分
+    if total_w == 0:
+        for obs in sorted(done_obs, key=lambda o: o.window_start_sec):
+            p = obs.vlm_payload or {}
+            if not _visual_payload_usable(p):
+                continue
+            window_sec = max(obs.window_end_sec - obs.window_start_sec, 1)
+            presence = float(p.get("teaching_presence_score") or 0)
+            if presence <= 0:
+                continue
+            weight = window_sec
+            w_posture += presence * weight
+            w_gesture += presence * weight
+            w_expression += presence * weight
+            affect = p.get("affect") or {}
+            w_nervousness += float(affect.get("nervousness") or 0.2) * weight
+            w_anxiety += float(affect.get("anxiety") or 0.2) * weight
+            w_naturalness += float(affect.get("naturalness") or 0.7) * weight
+            total_w += weight
+            if not any(
+                e.get("observation_id") == obs.observation_id for e in timeline
+            ):
+                _append_visual_timeline_events(timeline, obs, p)
+
+    if total_w == 0:
+        return {"enabled": True, "overall_presence_score": 0, "timeline": timeline}
+
+    avg_posture    = int(round(w_posture    / total_w))
+    avg_gesture    = int(round(w_gesture    / total_w))
+    avg_expression = int(round(w_expression / total_w))
+    avg_presence   = int(round(0.35 * avg_posture + 0.30 * avg_gesture + 0.35 * avg_expression))
+    avg_nervousness = round(w_nervousness / total_w, 2)
+    avg_anxiety     = round(w_anxiety     / total_w, 2)
+    avg_naturalness = round(w_naturalness / total_w, 2)
+
+    level_label = (
+        "优秀" if avg_presence >= 85 else
+        "良好" if avg_presence >= 70 else
+        "待提升" if avg_presence >= 60 else
+        "需关注"
+    )
+    summary_parts = []
+    if avg_nervousness > 0.45:
+        summary_parts.append("整体有一定紧张感")
+    if avg_naturalness > 0.70:
+        summary_parts.append("教态较为自然从容")
+    if avg_gesture < 65:
+        summary_parts.append("手势运用偏少")
+    if avg_expression >= 75:
+        summary_parts.append("表情自然亲切")
+    summary = "；".join(summary_parts) or f"教姿教态{level_label}"
+
+    timeline.sort(key=lambda e: e.get("class_elapsed_sec", 0))
+
+    return {
+        "enabled": True,
+        "overall_presence_score": avg_presence,
+        "dimension_scores": {
+            "posture": avg_posture,
+            "gesture": avg_gesture,
+            "expression": avg_expression,
+            "composure": int(round((1 - avg_nervousness) * 100)),
+        },
+        "affect_avg": {
+            "nervousness": avg_nervousness,
+            "anxiety": avg_anxiety,
+            "naturalness": avg_naturalness,
+        },
+        "summary": summary,
+        "timeline": timeline,
+        "window_count": len(done_obs),
+    }
+
+
 def build_report_response(
     session: ClassroomSession,
     turns: list[SessionTurn],
     segments: list[SessionSegment],
     lesson_json: dict[str, Any],
     ai_report: dict[str, Any],
+    visual_obs: list[SessionVisualObservation] | None = None,
 ) -> dict[str, Any]:
     started_at = session.started_at or session.created_at
     ended_at = session.ended_at or started_at
@@ -118,9 +342,19 @@ def build_report_response(
     )
     question_types = _build_question_types(turns)
     time_distribution = _build_time_distribution(segments, duration_min)
-    dimensions, scores = _build_dimensions(ai_report)
+
+    visual_analysis = _build_visual_analysis(visual_obs or [], started_at, str(session.id))
+    dimensions, scores = _build_dimensions(ai_report, visual_analysis)
+
+    overall_score_speech = int(ai_report.get("overall_score") or 0)
+    visual_overall = visual_analysis.get("overall_presence_score") or 0
+    if visual_analysis.get("enabled") and visual_overall > 0:
+        blended_score = int(round(0.70 * overall_score_speech + 0.30 * visual_overall))
+    else:
+        blended_score = overall_score_speech
+
     overall_level, overall_desc = _overall_level_and_desc(
-        int(ai_report.get("overall_score") or 0),
+        blended_score,
         _normalize_report_wording(str(ai_report.get("summary") or "").strip()),
     )
     custom_goal_feedback = _build_custom_goal_feedback(
@@ -160,6 +394,7 @@ def build_report_response(
         "duration_overtime": duration_overtime,
         "overall_level": overall_level,
         "overall_desc": overall_desc,
+        "overall_score_speech": overall_score_speech,
         "dimensions": dimensions,
         "hard_stats": hard_stats,
         "time_distribution": time_distribution,
@@ -170,11 +405,63 @@ def build_report_response(
         "history_comparison": "",
         "highlight_events": highlights,
         "scores": scores,
+        "visual_analysis": visual_analysis,
         "radar_chart_data": {
             "indicators": [item["label"] for item in dimensions],
             "values": [item["_val"] for item in dimensions],
         },
     }
+
+
+def _ai_report_from_cached_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    scores = payload.get("scores") or {}
+    return {
+        "overall_score": int(payload.get("overall_score_speech") or 0),
+        "dimension_scores": {
+            "instructional_clarity": int(scores.get("content_accuracy") or 0),
+            "student_engagement": int(scores.get("interaction_quality") or 0),
+            "pace_control": int(scores.get("pacing") or 0),
+        },
+        "summary": str(payload.get("overall_desc") or ""),
+    }
+
+
+def merge_visual_into_report_payload(
+    payload: dict[str, Any],
+    visual_obs: list[SessionVisualObservation],
+    session: ClassroomSession,
+) -> dict[str, Any]:
+    """VLM 异步完成后再读报告时，把最新 visual 数据合并进已缓存的 report_payload。"""
+    result = dict(payload)
+    started_at = session.started_at or session.created_at
+    visual_analysis = _build_visual_analysis(visual_obs, started_at, str(session.id))
+    result["visual_analysis"] = visual_analysis
+
+    ai_report = _ai_report_from_cached_payload(payload)
+    dimensions, scores = _build_dimensions(ai_report, visual_analysis)
+
+    overall_score_speech = int(payload.get("overall_score_speech") or ai_report.get("overall_score") or 0)
+    visual_overall = int(visual_analysis.get("overall_presence_score") or 0)
+    if visual_analysis.get("enabled") and visual_overall > 0:
+        blended_score = int(round(0.70 * overall_score_speech + 0.30 * visual_overall))
+    else:
+        blended_score = overall_score_speech
+
+    overall_level, overall_desc = _overall_level_and_desc(
+        blended_score,
+        _normalize_report_wording(str(ai_report.get("summary") or payload.get("overall_desc") or "").strip()),
+    )
+
+    result["dimensions"] = dimensions
+    result["scores"] = scores
+    result["overall_level"] = overall_level
+    result["overall_desc"] = overall_desc
+    result["overall_score_speech"] = overall_score_speech
+    result["radar_chart_data"] = {
+        "indicators": [item["label"] for item in dimensions],
+        "values": [item["_val"] for item in dimensions],
+    }
+    return result
 
 
 def _duration_minutes(started_at: datetime, ended_at: datetime) -> int:
@@ -345,25 +632,33 @@ def _build_time_distribution(
 
 def _build_dimensions(
     ai_report: dict[str, Any],
+    visual_analysis: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     dim = ai_report.get("dimension_scores") or {}
     clarity = int(dim.get("instructional_clarity") or 0)
     engagement = int(dim.get("student_engagement") or 0)
     pace = int(dim.get("pace_control") or 0)
-    scores = {
+    scores: dict[str, int] = {
         "content_accuracy": clarity,
         "syllabus_alignment": int(round((clarity + pace) / 2)),
         "interaction_quality": engagement,
         "pacing": pace,
         "language_appropriateness": int(round((clarity + pace) / 2)),
     }
-    labels = {
+    labels: dict[str, str] = {
         "content_accuracy": "内容准确",
         "syllabus_alignment": "教案贴合",
         "interaction_quality": "互动质量",
         "pacing": "课堂节奏",
         "language_appropriateness": "语言表达",
     }
+
+    # 第六维度：教姿教态（仅视觉分析可用时加入雷达图）
+    if visual_analysis and visual_analysis.get("enabled"):
+        presence_score = int(visual_analysis.get("overall_presence_score") or 0)
+        scores["teaching_presence"] = presence_score
+        labels["teaching_presence"] = "教姿教态"
+
     dimensions = []
     for key, value in scores.items():
         dimensions.append(

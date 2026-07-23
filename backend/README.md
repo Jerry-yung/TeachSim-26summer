@@ -37,11 +37,11 @@ alembic upgrade head
 
 ```bash
 cd backend
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8010
 ```
 
-- 健康检查：`GET http://localhost:8000/health`
-- 文档：`http://localhost:8000/docs`
+- 健康检查：`GET http://localhost:8010/health`
+- 文档：`http://localhost:8010/docs`
 
 ## 接口
 
@@ -50,7 +50,7 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 查询某 session 下全班4名学生的当前状态（类型、举手、睡觉、交头接耳）。
 
 ```bash
-curl -s http://localhost:8000/api/inclass/student-states/$(echo $SESSION_ID)
+curl -s http://localhost:8010/api/inclass/student-states/$(echo $SESSION_ID)
 ```
 
 响应示例：
@@ -88,19 +88,19 @@ curl -s http://localhost:8000/api/inclass/student-states/$(echo $SESSION_ID)
 
 教师正常发言（无点名）：
 ```bash
-curl -s -X POST http://localhost:8000/api/inclass/utterance -H "Content-Type: application/json" -d '{"session_id":"'"$SESSION_ID"'","role":"teacher","content":"同学们，谁来回答这个问题？","current_timestamp":"2026-07-15T15:00:00+08:00"}' | python3 -m json.tool
+curl -s -X POST http://localhost:8010/api/inclass/utterance -H "Content-Type: application/json" -d '{"session_id":"'"$SESSION_ID"'","role":"teacher","content":"同学们，谁来回答这个问题？","current_timestamp":"2026-07-15T15:00:00+08:00"}' | python3 -m json.tool
 ```
 
 教师点名并触发纪律解除（前端随机触发 discipline）：
 ```bash
-curl -s -X POST http://localhost:8000/api/inclass/utterance -H "Content-Type: application/json" -d '{"session_id":"'"$SESSION_ID"'","role":"teacher","content":"小乐，别睡觉了","current_timestamp":"2026-07-15T15:01:00+08:00","called_student_id":"student_xl","discipline_action":"cancel_sleep"}' | python3 -m json.tool
+curl -s -X POST http://localhost:8010/api/inclass/utterance -H "Content-Type: application/json" -d '{"session_id":"'"$SESSION_ID"'","role":"teacher","content":"小乐，别睡觉了","current_timestamp":"2026-07-15T15:01:00+08:00","called_student_id":"student_xl","discipline_action":"cancel_sleep"}' | python3 -m json.tool
 ```
 
 **各 `dialog_state` 行为对照**：
 
 | `dialog_state` | 举手行为 | `play_mode` | `preset_for_student_id` |
 |---|---|---|---|
-| `questioning` | 后端随机挑 **2 人**举手 | `on_call_name` | `null` |
+| `questioning` | 按课前氛围 + `question_difficulty` 选人举手（≤ 全班 50%） | `on_call_name` | `null` |
 | `ambiguous` | 后端随机指定 **1 学困生**举手 | `on_call_name` | 该学困生 ID |
 | `misstatement` | 后端随机指定 **1 杠精**举手 | `on_call_name` | 该杠精 ID |
 | `relay_answer` | 不举手，直接站立 | `immediate` | `called_student_id` |
@@ -117,7 +117,7 @@ curl -s -X POST http://localhost:8000/api/inclass/utterance -H "Content-Type: ap
 | `grade` | 是 | 年级 |
 | `subject` | 是 | 学科 |
 | `class_level` | 是 | `重点班` 或 `普通班` |
-| `atmosphere` | 是 | `活跃` 或 `沉闷` |
+| `atmosphere` | 是 | `活跃` / `均衡` / `沉闷`（或三档中文选项经前端归一化） |
 | `custom_goal` | 否 | 练习目标，默认空 |
 | `teacher_context` | 否 | 教师背景描述（与前端对接用） |
 | `file` | 否 | 教案：pdf/doc/docx/ppt/pptx，最大 20MB |
@@ -149,7 +149,7 @@ curl -s -X POST http://localhost:8000/api/inclass/utterance -H "Content-Type: ap
 初始化课程（无文件）：
 
 ```bash
-curl -s -X POST http://localhost:8000/api/init_lesson \
+curl -s -X POST http://localhost:8010/api/init_lesson \
   -F "grade=初二" -F "subject=数学" \
   -F "class_level=普通班" -F "atmosphere=活跃" \
   -F "custom_goal=练习衔接"
@@ -158,7 +158,7 @@ curl -s -X POST http://localhost:8000/api/init_lesson \
 调试 ASR：
 
 ```bash
-curl -s -X POST http://localhost:8000/api/debug/transcribe \
+curl -s -X POST http://localhost:8010/api/debug/transcribe \
   -F "audio=@sample.wav;type=audio/wav"
 ```
 
@@ -215,7 +215,7 @@ print('All tests passed!')
 
 ```bash
 # 1) 创建课程
-RESP=$(curl -s -X POST http://localhost:8000/api/init_lesson \
+RESP=$(curl -s -X POST http://localhost:8010/api/init_lesson \
   -F "grade=初二" -F "subject=数学" \
   -F "class_level=重点班" -F "atmosphere=活跃")
 echo $RESP
@@ -224,47 +224,47 @@ echo $RESP
 SESSION_ID=$(echo $RESP | python3 -c "import sys,json; print(json.load(sys.stdin)['session_id'])")
 
 # 2) 查询全班学生状态（应返回4人，student_type 按重点班比例分配）
-curl -s http://localhost:8000/api/inclass/student-states/$SESSION_ID | python3 -m json.tool
+curl -s http://localhost:8010/api/inclass/student-states/$SESSION_ID | python3 -m json.tool
 ```
 
 **2. 模拟教师提问，观察举手状态**
 
 ```bash
 # 教师提问 → 应返回 questioning + 2人举手 + on_call_mode
-curl -s -X POST http://localhost:8000/api/inclass/utterance -H "Content-Type: application/json" -d '{"session_id":"'"$SESSION_ID"'","role":"teacher","content":"谁来回答一下这个问题？","current_timestamp":"2026-07-15T15:00:00+08:00"}' | python3 -m json.tool
+curl -s -X POST http://localhost:8010/api/inclass/utterance -H "Content-Type: application/json" -d '{"session_id":"'"$SESSION_ID"'","role":"teacher","content":"谁来回答一下这个问题？","current_timestamp":"2026-07-15T15:00:00+08:00"}' | python3 -m json.tool
 
 # 验证举手状态已写入数据库
-curl -s http://localhost:8000/api/inclass/student-states/$SESSION_ID | python3 -m json.tool
+curl -s http://localhost:8010/api/inclass/student-states/$SESSION_ID | python3 -m json.tool
 ```
 
 **3. 模拟 relay_answer（点名接力）**
 
 ```bash
 # 教师点名某学生 → 应返回 relay_answer + immediate + preset_for_student_id 为该学生
-curl -s -X POST http://localhost:8000/api/inclass/utterance -H "Content-Type: application/json" -d '{"session_id":"'"$SESSION_ID"'","role":"teacher","content":"小明，你来补充一下。","current_timestamp":"2026-07-15T15:01:00+08:00","called_student_id":"student_xm"}' | python3 -m json.tool
+curl -s -X POST http://localhost:8010/api/inclass/utterance -H "Content-Type: application/json" -d '{"session_id":"'"$SESSION_ID"'","role":"teacher","content":"小明，你来补充一下。","current_timestamp":"2026-07-15T15:01:00+08:00","called_student_id":"student_xm"}' | python3 -m json.tool
 ```
 
 **4. 模拟 discipline 事件（前端随机触发）**
 
 ```bash
 # 前端让学生开始睡觉 → 应返回 discipline_sleep + immediate
-curl -s -X POST http://localhost:8000/api/inclass/utterance -H "Content-Type: application/json" -d '{"session_id":"'"$SESSION_ID"'","role":"teacher","content":"(系统事件)","current_timestamp":"2026-07-15T15:02:00+08:00","called_student_id":"student_xl","discipline_action":"start_sleep"}' | python3 -m json.tool
+curl -s -X POST http://localhost:8010/api/inclass/utterance -H "Content-Type: application/json" -d '{"session_id":"'"$SESSION_ID"'","role":"teacher","content":"(系统事件)","current_timestamp":"2026-07-15T15:02:00+08:00","called_student_id":"student_xl","discipline_action":"start_sleep"}' | python3 -m json.tool
 
 # 查询状态：student_xl 的 is_sleeping 应为 true
-curl -s http://localhost:8000/api/inclass/student-states/$SESSION_ID | python3 -m json.tool
+curl -s http://localhost:8010/api/inclass/student-states/$SESSION_ID | python3 -m json.tool
 
 # 老师点名该学生解除睡觉状态 → 应返回 discipline_sleep + immediate + is_sleeping 重置为 false
-curl -s -X POST http://localhost:8000/api/inclass/utterance -H "Content-Type: application/json" -d '{"session_id":"'"$SESSION_ID"'","role":"teacher","content":"小乐，醒醒。","current_timestamp":"2026-07-15T15:03:00+08:00","called_student_id":"student_xl","discipline_action":"cancel_sleep"}' | python3 -m json.tool
+curl -s -X POST http://localhost:8010/api/inclass/utterance -H "Content-Type: application/json" -d '{"session_id":"'"$SESSION_ID"'","role":"teacher","content":"小乐，醒醒。","current_timestamp":"2026-07-15T15:03:00+08:00","called_student_id":"student_xl","discipline_action":"cancel_sleep"}' | python3 -m json.tool
 ```
 
 **5. 验证新一轮 utterance 重置举手状态**
 
 ```bash
 # 第一轮：questioning 产生举手
-curl -s -X POST http://localhost:8000/api/inclass/utterance -H "Content-Type: application/json" -d '{"session_id":"'"$SESSION_ID"'","role":"teacher","content":"谁来回答一下这个问题？","current_timestamp":"2026-07-15T15:00:00+08:00"}' | python3 -m json.tool
+curl -s -X POST http://localhost:8010/api/inclass/utterance -H "Content-Type: application/json" -d '{"session_id":"'"$SESSION_ID"'","role":"teacher","content":"谁来回答一下这个问题？","current_timestamp":"2026-07-15T15:00:00+08:00"}' | python3 -m json.tool
 
 # 第二轮：普通发言（normal），查询 student-states，确认上一轮举手已被重置为 false
-curl -s -X POST http://localhost:8000/api/inclass/utterance -H "Content-Type: application/json" -d '{"session_id":"'"$SESSION_ID"'","role":"teacher","content":"我们继续讲课。","current_timestamp":"2026-07-15T15:04:00+08:00"}' | python3 -m json.tool
+curl -s -X POST http://localhost:8010/api/inclass/utterance -H "Content-Type: application/json" -d '{"session_id":"'"$SESSION_ID"'","role":"teacher","content":"我们继续讲课。","current_timestamp":"2026-07-15T15:04:00+08:00"}' | python3 -m json.tool
 
-curl -s http://localhost:8000/api/inclass/student-states/$SESSION_ID | python3 -m json.tool
+curl -s http://localhost:8010/api/inclass/student-states/$SESSION_ID | python3 -m json.tool
 ```
