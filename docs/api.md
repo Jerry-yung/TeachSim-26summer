@@ -1,159 +1,396 @@
-# TeachSim API 接口文档（修订建议稿）
+# TeachSim API 接口文档
 
-> **这是一人主操刀，三人监督的“合同文件”**，所有接口的 URL、请求体、响应体在开发前必须在此确认。
+> **这是一人主操刀，三人监督的“合同文件”**，所有接口的 URL、请求体、响应体在开发前必须在此确认。  
 > 如需修改接口，请提 PR 更新本文档，并通知相关成员。
-
-> 代码审阅基线：2026-07-19。本文按当前仓库实际代码区分“已实现”和“待补齐”，不把前端调用或 UI mock 当作后端已实现能力。
 
 ---
 
 ## 目录
 
 - [通用约定](#通用约定)
-- [一、当前业务后端已实现接口](#一当前业务后端已实现接口)
-
-- [二、AI 服务接口](#二ai-服务接口)
-- [三、联调阻塞项](#三联调阻塞项)
+- [一、认证模块](#一认证模块)
+- [二、课前配置模块](#二课前配置模块)
+- [三、课堂交互模块](#三课堂交互模块)
+- [四、视觉教态模块](#四视觉教态模块)
+- [五、报告与历史模块](#五报告与历史模块)
+- [六、语音模块](#六语音模块)
+- [七、AI 服务接口](#七ai-服务接口)
 
 ---
 
 ## 通用约定
 
 - 前端地址：`http://localhost:5173`
+- 业务后端 Base URL：`http://localhost:8010`
 - AI 服务 Base URL：`http://localhost:8001`
-- 业务后端代码文档使用端口 8000；当前前端代理默认指向 8010。联调前必须二选一统一：
-  - 后端以 `--port 8010` 启动；或
-  - 设置 `VITE_BACKEND_PROXY_TARGET=http://127.0.0.1:8000`。
 - 前端通过 `/backend-api` 代理业务后端，通过 `/ai-api` 代理 AI 服务。
-- JSON 接口使用 `application/json`；文件上传使用 `multipart/form-data`。
-- 业务后端 `HTTPException` 和参数校验错误统一转换为：
+- JSON 接口使用 `application/json`，文件上传使用 `multipart/form-data`。
+- 业务认证使用 HttpOnly Cookie，前端请求携带 `credentials: include`。
+- 课程、课堂、报告和历史数据均与当前登录用户关联。
 
-  ```json
-  { "code": 400, "message": "错误原因描述" }
-  ```
-
-- 当前前端按 Cookie 会话方式发送 `credentials: include`
----
-
-## 一、当前业务后端已实现接口
-
-### 1.1 健康检查
-
-`GET /health`
+统一错误响应：
 
 ```json
-{ "status": "ok" }
+{
+  "code": 400,
+  "message": "错误原因描述"
+}
 ```
 
-### 1.2 上传教案并初始化课程
+---
 
-`POST /api/init_lesson`，`multipart/form-data`
+## 一、认证模块
+
+路由前缀：`/api/auth`
+
+### 1.1 邮箱注册
+
+发送验证码：
+
+```http
+POST /api/auth/register/send-code
+```
+
+```json
+{
+  "email": "teacher@example.com"
+}
+```
+
+校验验证码：
+
+```http
+POST /api/auth/register/verify-code
+```
+
+```json
+{
+  "email": "teacher@example.com",
+  "code": "123456"
+}
+```
+
+完成注册：
+
+```http
+POST /api/auth/register/complete
+```
+
+```json
+{
+  "email": "teacher@example.com",
+  "display_name": "教师姓名",
+  "password": "password",
+  "verification_token": "token"
+}
+```
+
+注册成功后自动建立登录会话。
+
+### 1.2 登录与退出
+
+登录：
+
+```http
+POST /api/auth/login
+```
+
+```json
+{
+  "email": "teacher@example.com",
+  "password": "password"
+}
+```
+
+退出：
+
+```http
+POST /api/auth/logout
+```
+
+获取当前用户：
+
+```http
+GET /api/auth/me
+```
+
+用户响应：
+
+```json
+{
+  "user": {
+    "id": "uuid",
+    "email": "teacher@example.com",
+    "display_name": "教师姓名",
+    "role": "实习教师"
+  }
+}
+```
+
+### 1.3 密码重置
+
+- `POST /api/auth/password-reset/send-code`
+- `POST /api/auth/password-reset/verify-code`
+- `POST /api/auth/password-reset/complete`
+
+完成密码重置：
+
+```json
+{
+  "email": "teacher@example.com",
+  "new_password": "new-password",
+  "verification_token": "token"
+}
+```
+
+---
+
+## 二、课前配置模块
+
+### 2.1 初始化课程
+
+```http
+POST /api/init_lesson
+Content-Type: multipart/form-data
+```
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---:|---|
-| `grade` | string | 是 | 年级 |
-| `subject` | string | 是 | 学科 |
+| `grade` | string | 是 | 学生年级 |
+| `subject` | string | 是 | 授课学科 |
 | `class_level` | string | 是 | `重点班`、`普通班`、`平行班` |
-| `atmosphere` | string | 是 | `活跃`、`沉闷`、`活跃互动型`、`沉浸讲解型`、`严谨讨论型`、`练习主导型` |
-| `custom_goal` | string | 否 | 自定义训练目标，默认空字符串 |
-| `teacher_context` | string | 否 | 教师输入的课堂背景 |
-| `lesson_json` | JSON 字符串 | 否 | 已结构化教案对象 |
-| `ppt_json` | JSON 字符串 | 否 | 已结构化 PPT 对象 |
+| `atmosphere` | string | 是 | 课堂氛围 |
+| `custom_goal` | string | 否 | 本次训练目标 |
+| `teacher_context` | string | 否 | 教师补充的课堂背景 |
+| `lesson_json` | JSON 字符串 | 否 | 结构化教案 |
+| `ppt_json` | JSON 字符串 | 否 | 结构化课件 |
 | `teaching_preferences_json` | JSON 字符串 | 否 | 开课前问卷结果 |
-| `frontend_session_id` | string | 否 | 前端临时会话标识 |
+| `frontend_session_id` | string | 否 | 前端会话标识 |
 | `file` | File | 否 | PDF、DOC、DOCX、PPT、PPTX，最大 20MB |
 
 响应：
 
 ```json
 {
-  "lesson_id": "uuid-xxxx",
-  "session_id": "uuid-xxxx",
-  "status": "processing",
-  "message": "教案上传成功，正在后台提取知识点"
+  "lesson_id": "uuid",
+  "session_id": "uuid",
+  "status": "ready",
+  "message": "课堂初始化成功"
 }
 ```
 
-- 有可解析文件且未提供 `lesson_json`：`processing`，后端后台调用 AI 解析。
-- 已提供 `lesson_json`，或未上传文件进入自由模式：`ready`。
-- 当前接口只接收一个 `file`。前端若同时有教案和 PPT，会先直接调用 AI 合并解析，再把结构化结果和一个原始文件交给业务后端。
+课程初始化同时完成：
 
-### 1.3 查询课程预处理状态
+- 课程和课堂会话入库；
+- 教案、课件和教学偏好保存；
+- 4 名虚拟学生的课堂状态初始化；
+- PPT/PPTX 课件预览准备；
+- 课程内容结构化分析。
 
-`GET /api/lesson/{lesson_id}/status`
+### 2.2 查询课程分析状态
+
+```http
+GET /api/lesson/{lesson_id}/status
+```
 
 ```json
 {
-  "lesson_id": "uuid-xxxx",
+  "lesson_id": "uuid",
   "embedding_status": "done",
   "lesson_topic": "勾股定理",
   "subject": "初中数学",
   "subject_icon": "🔢",
   "knowledge_points_preview": [
-    { "point": "勾股定理定义", "difficulty": "中" }
+    {
+      "point": "勾股定理定义",
+      "difficulty": "中"
+    }
   ],
   "teacher_questions": []
 }
 ```
 
-`teacher_questions` 优先读取 AI 教案结构化结果；为空时使用业务后端内置问卷。内置问卷包括时长、年级、班级类型、学生基础、教学目标、突破方向和课堂氛围。
+### 2.3 PPT 预览
 
-### 1.4 保存课堂发言并执行 Supervisor 决策
+- `GET /api/lesson/{lesson_id}/ppt-preview`
+- `GET /api/lesson/{lesson_id}/ppt-preview/file`
 
-`POST /api/inclass/utterance`，`application/json`
+预览状态：
 
 ```json
 {
-  "session_id": "uuid-xxxx",
-  "role": "teacher",
-  "content": "谁能回答这个问题？",
-  "current_timestamp": "2026-07-19T10:00:00+08:00",
-  "called_student_id": null,
-  "current_ppt": [],
-  "skip_supervisor": false
+  "ready": true,
+  "message": "ok",
+  "preview_path": "/api/lesson/{lesson_id}/ppt-preview/file",
+  "page_count": 12
 }
 ```
 
-| 字段 | 类型 | 必填 | 说明 |
-|---|---|---:|---|
-| `session_id` | string | 是 | 标准 UUID |
-| `role` | string | 是 | 精确为 `teacher` 时按教师处理，其他值按学生处理 |
-| `content` | string | 是 | 非空发言内容 |
-| `current_timestamp` | string | 是 | ISO8601；代码可解析 `Z` |
-| `called_student_id` | string/null | 否 | 被点名学生 ID |
-| `current_ppt` | array/null | 否 | 当前 PPT 页，通常一项 |
-| `skip_supervisor` | boolean | 否 | 默认 `false` |
+### 2.4 重新创建课堂
 
-非教师发言或 `skip_supervisor=true` 时只落库，返回固定 `normal`。教师发言会携带最近 20 条历史调用 AI Supervisor。
-
-> 当前阻塞：业务后端发送给 AI 的字段是 `current_timestamp`、`called_student_id`；AI v2 实际读取 `class_elapsed_sec`、`called_student_status_digest`。修复前，接力回答等依赖 digest 的能力不能视为已打通。
-
-### 1.5 查询虚拟学生静态状态
-
-`GET /api/inclass/student-state/{student_id}`
-
-| `student_id` | 文档/前端显示名 | `student_type` | 默认举手 |
-|---|---|---|---:|
-| `student_xm` | 小明 | `xueyou` | 否 |
-| `student_xw` | 小闻（原文）；前端当前显示“小红”，待团队统一 | `gangjing` | 是 |
-| `student_xw2` | 小王 | `xuekun` | 否 |
-| `student_xl` | 小乐 | `xuekun` | 是 |
-
-该接口返回的是进程内常量，不按 `session_id` 存储动态状态。前端传入的 `session_id` 查询参数当前会被忽略。
-
-### 1.6 保存并评价课堂片段
-
-`POST /api/inclass/segment`，`application/json`
-
-必填字段：`session_id`、`segment_id`、`start_ts`、`end_ts`。可选字段：`slide_no`、`teacher_utterances`、`student_utterances`、`ppt_context`、`current_ppt`、`ppt_text`。
-
-`teacher_utterances` 和 `student_utterances` 中每项均为：
-
-```json
-{ "speaker": "teacher", "ts": "2026-07-19T10:00:10+08:00", "text": "讲解内容" }
+```http
+POST /api/session/{session_id}/restart
 ```
 
-响应：
+该接口复用原课程和课前配置，创建全新的课堂会话和学生状态。
+
+---
+
+## 三、课堂交互模块
+
+路由前缀：`/api/inclass`
+
+### 3.1 保存课堂发言并执行决策
+
+```http
+POST /api/inclass/utterance
+Content-Type: application/json
+```
+
+```json
+{
+  "session_id": "uuid",
+  "role": "teacher",
+  "content": "谁能回答这个问题？",
+  "current_timestamp": "2026-07-23T10:00:00+08:00",
+  "class_elapsed_sec": 125,
+  "called_student_id": null,
+  "discipline_student_id": null,
+  "slide_no": 2,
+  "current_ppt": [],
+  "skip_supervisor": false,
+  "discipline_action": null
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `session_id` | 当前课堂 UUID |
+| `role` | `teacher` 或学生角色 |
+| `content` | 本轮发言 |
+| `current_timestamp` | ISO8601 时间 |
+| `class_elapsed_sec` | 课内计时秒数 |
+| `called_student_id` | 被点名学生 ID |
+| `discipline_student_id` | 纪律事件目标学生 |
+| `slide_no` | 当前 PPT 页 |
+| `current_ppt` | 当前页结构化内容 |
+| `skip_supervisor` | 是否只保存发言 |
+| `discipline_action` | 睡觉、交头接耳状态的开始或取消操作 |
+
+决策响应：
+
+```json
+{
+  "dialog_state": "questioning",
+  "should_trigger_student": true,
+  "trigger_reason": "teacher_question",
+  "target_student_type": "all",
+  "interaction_round_id": "uuid",
+  "play_mode": "on_call_name",
+  "raised_hand_student_ids": [
+    "student_xm",
+    "student_xw"
+  ],
+  "preset_for_student_id": null,
+  "student_states_digest": [],
+  "preset_consumed": false,
+  "student_event": null
+}
+```
+
+课堂状态：
+
+| `dialog_state` | 课堂行为 |
+|---|---|
+| `normal` | 正常讲课 |
+| `questioning` | 根据课堂氛围、问题难度和学生状态选择学生举手 |
+| `ambiguous` | 学困生针对表述提出疑问 |
+| `misstatement` | 杠精学生针对知识点提出质疑 |
+| `relay_answer` | 被点名学生补充或接力回答 |
+| `discipline_whisper` | 处理交头接耳场景 |
+| `discipline_sleep` | 处理睡觉场景 |
+
+`play_mode` 取值：
+
+- `immediate`：收到回复后立即播放；
+- `on_call_name`：学生先举手，教师点名后播放。
+
+普通发言可返回 `204 No Content`，前端据此继续课堂流程。
+
+### 3.2 点名学生回复
+
+```http
+POST /api/inclass/student-reply
+```
+
+```json
+{
+  "session_id": "uuid",
+  "student_id": "student_xm",
+  "current_timestamp": "2026-07-23T10:01:00+08:00",
+  "class_elapsed_sec": 180,
+  "slide_no": 2,
+  "current_ppt": [],
+  "question_bundle_text": "为什么勾股定理只适用于直角三角形？",
+  "question_count": 1,
+  "question_items": []
+}
+```
+
+```json
+{
+  "student_id": "student_xm",
+  "student_type": "xueyou",
+  "reply_text": "学生回复内容",
+  "emotion": "curious",
+  "is_proactive_speaking": true
+}
+```
+
+### 3.3 查询虚拟学生状态
+
+- `GET /api/inclass/student-state/{student_id}?session_id={session_id}`
+- `GET /api/inclass/student-states/{session_id}`
+
+```json
+{
+  "student_id": "student_xm",
+  "student_name": "小明",
+  "student_type": "xueyou",
+  "is_hand_raised": true,
+  "is_sleeping": false,
+  "is_whispering": false
+}
+```
+
+课堂学生：
+
+| `student_id` | 显示名称 |
+|---|---|
+| `student_xm` | 小明 |
+| `student_xw` | 小闻（原文）；系统界面显示小红 |
+| `student_xw2` | 小王 |
+| `student_xl` | 小乐 |
+
+学生类型与动态状态按课堂会话保存。
+
+### 3.4 保存并评价课堂片段
+
+```http
+POST /api/inclass/segment
+```
+
+主要字段：
+
+- `session_id`、`segment_id`
+- `start_ts`、`end_ts`
+- `start_elapsed_sec`、`end_elapsed_sec`
+- `slide_no`
+- `teacher_utterances`
+- `student_utterances`
+- `ppt_context`、`current_ppt`、`ppt_text`
+
+评价响应：
 
 ```json
 {
@@ -162,50 +399,172 @@
     "student_engagement": 78,
     "pace_control": 80
   },
-  "strengths": ["表现亮点"],
-  "issues": ["存在问题"],
-  "improvement_actions": ["可执行建议"]
+  "strengths": [
+    "表现亮点"
+  ],
+  "issues": [
+    "需要关注的课堂表现"
+  ],
+  "improvement_actions": [
+    "下一次可执行的改进动作"
+  ]
 }
 ```
 
-同一课堂重复提交相同 `segment_id` 时更新原记录。数据库当前没有 `(session_id, segment_id)` 唯一约束，幂等性由应用查询保证，并发重复请求仍需额外防护。
+---
 
-### 1.7 获取课后报告
+## 四、视觉教态模块
 
-`GET /api/report/{session_id}`
+### 4.1 上传视觉观察窗口
 
-首次请求会把会话标为 `completed`，调用 AI 报告接口；AI 调用失败时使用本地降级报告。结果写入 `sessions.report_payload`，后续请求直接返回缓存。
+```http
+POST /api/inclass/visual-observation
+Content-Type: multipart/form-data
+```
 
-主要响应字段：
+成功状态码：202。
 
-- 课程信息：`session_id`、`lesson_topic`、`subject`、`class_info`、`created_at`、`duration_min`
-- 总体结论：`overall_level`、`overall_desc`
-- 五维结果：`dimensions`、`scores`、`radar_chart_data`
-- 硬指标：`hard_stats`
-- 教学结构：`time_distribution`、`question_types`
-- 定向反馈：`custom_goal_feedback`、`improvement_suggestions`
-- 课堂证据：`highlight_events`
-- 历史预留：`is_improved=false`、`history_comparison=""`
+| 字段 | 说明 |
+|---|---|
+| `session_id` | 当前课堂 |
+| `observation_id` | 视觉窗口标识 |
+| `segment_id` | 对应课堂片段 |
+| `window_start_sec` / `window_end_sec` | 课堂时间窗口 |
+| `slide_no` | 当前 PPT 页 |
+| `precheck_passed` | 前端画面预检结果 |
+| `chat_history_json` | 最近师生对话 |
+| `frames_b64_json` | JPEG 抽样帧 |
+| `thumbnail` | JPEG 缩略图 |
+| `clip` | WebM 短片 |
 
-注意：当前 `total_words` 实际按教师发言字符串长度计算，中文场景更接近“字符数”，并非严格分词后的词数；`avg_speed_wpm` 也基于该值。
+```json
+{
+  "observation_id": "uuid_w1",
+  "status": "accepted",
+  "message": ""
+}
+```
 
-### 1.8 调试音频转写
+系统以 15 秒为观察窗口，结合抽样图像、短片、课堂发言和 PPT 页码完成教姿教态分析。
 
-`POST /api/debug/transcribe`，`multipart/form-data`
+### 4.2 获取视觉素材
 
-- `audio`：必填，WAV/MP3/OGG，最大 20MB。
-- `lesson_id`：可选；合法 UUID 时可关联教案，非法值直接忽略。
-- 当前实现支持火山引擎；`ASR_PROVIDER=aliyun` 尚未实现。
+- `GET /api/report/{session_id}/visual-clip/{observation_id}`
+- `GET /api/report/{session_id}/visual-thumb/{observation_id}`
 
-
+接口分别返回 WebM 课堂短片和 JPEG 缩略图。
 
 ---
 
-## 二、AI 服务接口
+## 五、报告与历史模块
 
-AI 服务监听 8001。完整内部契约只在 `ai/docs/ai-backend-contract-v2.md` 维护，本文不重复定义字段。
+### 5.1 获取课后报告
 
-当前主要接口：
+```http
+GET /api/report/{session_id}
+```
+
+查询参数：
+
+- `force=true`：重新生成报告；
+- `wait_visual=true`：等待视觉分析结果。
+
+报告包括：
+
+- 课程主题、学科、班级和课堂时长；
+- 内容准确、教案贴合、互动质量、课堂节奏和语言表达；
+- 总字数、平均语速、等待时间和口头禅；
+- 课堂时间分布和问题类型；
+- 自定义训练目标反馈；
+- 课堂高光和师生互动事件；
+- 教姿教态综合得分、维度分数和时间轴；
+- 改进建议。
+
+### 5.2 最近五节课堂比较
+
+```http
+GET /api/report/{session_id}/recent5-comparison
+```
+
+比较指标：
+
+- 平均语速；
+- 平均等待时长；
+- 互动质量；
+- 讲述模糊与错误数。
+
+### 5.3 历史课堂
+
+路由前缀：`/api/history`
+
+- `GET /sessions`
+- `GET /session-dates`
+- `GET /sessions/{session_id}`
+- `DELETE /sessions/{session_id}`
+- `GET /latest-preset`
+- `GET /ability-profile`
+
+历史课堂支持：
+
+- 课程主题搜索；
+- 日期范围筛选；
+- 报告回看；
+- 课堂记录删除；
+- 上一节课配置复用；
+- 能力画像与趋势分析。
+
+能力画像包括课堂节奏、互动组织、讲解清晰度和课堂管理。
+
+---
+
+## 六、语音模块
+
+### 6.1 讯飞实时 ASR 签名
+
+```http
+POST /api/asr/xfyun/sign
+```
+
+```json
+{
+  "ws_url": "wss://...",
+  "app_id": "app-id",
+  "expires_in_seconds": 300
+}
+```
+
+前端使用签名 URL 建立讯飞实时听写连接。
+
+### 6.2 MiniMax 学生语音
+
+```http
+POST /api/tts/minimax/synthesize
+```
+
+```json
+{
+  "text": "学生需要朗读的内容",
+  "student_id": "student_xm"
+}
+```
+
+成功响应类型为 `audio/mpeg`。学生 ID 用于选择对应音色。
+
+### 6.3 调试音频转写
+
+```http
+POST /api/debug/transcribe
+Content-Type: multipart/form-data
+```
+
+- `audio`：WAV、MP3 或 OGG，最大 20MB；
+- `lesson_id`：可关联当前用户的课程。
+
+---
+
+## 七、AI 服务接口
+
+AI 服务主要接口：
 
 - `POST /ai/parse_lesson`
 - `POST /ai/parse_lessons`
@@ -214,19 +573,12 @@ AI 服务监听 8001。完整内部契约只在 `ai/docs/ai-backend-contract-v2.
 - `POST /ai/v2/inclass/segment/eval`
 - `POST /ai/v2/inclass/supervisor/decide`
 - `POST /ai/v2/inclass/student/reply`
+- `POST /ai/v2/inclass/visual/analyze`
 - `POST /ai/v2/postclass/report/generate`
 
----
-
-## 三、联调阻塞项
-
-1. 统一业务后端端口 8000/8010。
-2. 决定并实现 Cookie 会话认证，或临时放开前端路由守卫。
-3. 统一 Supervisor 字段：优先采用 AI v2 的 `class_elapsed_sec`、`called_student_status_digest`。
-4. 在业务后端实现 `/api/inclass/student-reply` 转发，或明确让前端直连 AI v2。
-5. 合并或实现 PPT 预览、会话重启、历史课堂、能力画像、ASR 签名和 TTS 接口。
-6. 统一 `student_xw` 的显示名；在团队决定前保留原文人名，不擅自替换。
+AI 服务完成教案解析、PPT 结构化、课堂状态判断、虚拟学生回复、课堂片段评价、教姿教态分析和课后报告生成。
 
 ---
 
-*文档版本：v0.2 | 代码基线：2026-07-19 | 如有变更请同步通知 A/B/C 三位成员*
+*文档版本：v1.0 | 最后更新：2026-07-23 | 如有变更请同步通知 A/B/C 三位成员*
+

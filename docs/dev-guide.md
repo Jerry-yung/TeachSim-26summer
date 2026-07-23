@@ -1,4 +1,4 @@
-# 开发规范与协作指南（修订建议稿）
+# 开发规范与协作指南
 
 ---
 
@@ -10,25 +10,60 @@ TeachSim-26summer/
 ├── backend/        ← 唐一嘉 负责（FastAPI + SQLAlchemy + PostgreSQL）
 ├── ai/             ← 杨云天 负责（FastAPI + LangChain + Prompt）
 └── docs/           ← 周光轩主要负责，三人共同监督
-
 ```
 
-**原则：只在自己负责的文件夹里提交代码。** 修改别人负责目录的内容前先说明原因；接口变更必须同时通知调用方和文档负责人。
+**原则：只在自己负责的文件夹里提交代码。** 修改别人负责目录的内容前先说明原因；接口变更同时通知调用方和文档负责人。
 
 ---
 
-## 环境要求
+## 技术栈
 
-- Node.js：建议使用当前 Vite 5 支持的 LTS 版本
-- Python：3.11+
-- PostgreSQL：可使用 Supabase 托管实例
-- 前端端口：5173
-- AI 服务端口：8001
-- 业务后端端口：必须在 8000 和 8010 中统一，见下文
+### 前端
+
+- Vue 3
+- Vite 5
+- Pinia
+- Vue Router
+- ECharts
+- PDF.js
+- 浏览器 WebSocket、MediaRecorder、Web Audio 和 SpeechSynthesis
+
+### 业务后端
+
+- FastAPI
+- SQLAlchemy
+- Alembic
+- PostgreSQL
+- HttpOnly Cookie 会话
+
+### AI 服务
+
+- FastAPI
+- LangChain
+- 大语言模型
+- 多模态视觉模型
+- 教案、课件、课堂片段和报告智能体
 
 ---
 
-## 首次安装
+## 服务端口
+
+| 服务 | 地址 |
+|---|---|
+| 前端 | `http://localhost:5173` |
+| 业务后端 | `http://localhost:8010` |
+| AI 服务 | `http://localhost:8001` |
+
+前端代理：
+
+```dotenv
+VITE_BACKEND_PROXY_TARGET=http://127.0.0.1:8010
+VITE_AI_PROXY_TARGET=http://127.0.0.1:8001
+```
+
+---
+
+## 安装依赖
 
 ### 前端（A）
 
@@ -42,7 +77,8 @@ npm install
 ```bash
 cd backend
 python -m venv .venv
-# Windows PowerShell: .venv\Scripts\Activate.ps1
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
@@ -51,7 +87,8 @@ pip install -r requirements.txt
 ```bash
 cd ai
 python -m venv .venv
-# Windows PowerShell: .venv\Scripts\Activate.ps1
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
@@ -59,88 +96,142 @@ pip install -r requirements.txt
 
 ## 环境变量
 
-### 仓库根目录 `.env`
+在仓库根目录创建 `.env`，统一保存业务后端和 AI 服务配置。`.env` 不提交到 Git。
 
-`ai/setting/llm.py` 明确从仓库根目录 `.env` 读取模型供应商密钥，例如：
-
-```dotenv
-DEEPSEEK_API_KEY=your_key_here
-ECNU_API_KEY=your_key_here
-SILICONFLOW_API_KEY=your_key_here
-MOONSHOT_API_KEY=your_key_here
-```
-
-当前默认文本模型和报告模型使用 DeepSeek，多模态 PPT 图像分析使用 Moonshot 配置。实际启用的模型以 `ai/setting/llm.py` 中的统一入口为准。
-
-### `backend/.env`
-
-业务后端读取数据库、上传目录、AI 服务地址、CORS 和火山 ASR 调试配置。可从 `backend/.env.example` 复制后填写。
-
-**安全要求：** `.env.example` 只能包含占位符。当前仓库示例文件中存在看起来可用的凭据，应立即轮换并清理 Git 历史；任何文档、Issue、聊天记录和截图中都不要再次复制这些值。
-
-### 前端代理与浏览器能力
-
-前端配置从仓库根目录读取 Vite 环境变量：
+### 数据库
 
 ```dotenv
-VITE_BACKEND_PROXY_TARGET=http://127.0.0.1:8000
-VITE_AI_PROXY_TARGET=http://127.0.0.1:8001
+DATABASE_URL=postgresql://user:encoded_password@host:5432/postgres
+UPLOAD_DIR=uploads
 ```
 
-当前 `vite.config.js` 的业务后端默认值是 8010，而业务后端文档默认用 8000。推荐显式设置 `VITE_BACKEND_PROXY_TARGET`，避免依赖不一致的默认值。
+也可以使用：
 
-讯飞 ASR 当前前端通过业务后端 `/api/asr/xfyun/sign` 获取签名；MiniMax TTS 通过 `/api/tts/minimax/synthesize`。这两个路由当前未出现在 `backend/app`，联调前需合并或实现。
+```dotenv
+POSTGRES_USER=placeholder
+POSTGRES_PASSWORD=placeholder
+POSTGRES_HOST=placeholder
+POSTGRES_PORT=5432
+POSTGRES_DB=postgres
+POSTGRES_SSLMODE=require
+```
+
+### 业务后端
+
+```dotenv
+AI_SERVICE_URL=http://localhost:8001
+AI_TIMEOUT_S=30
+CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+JWT_SECRET=请填写至少32字符的随机字符串
+AUTH_SESSION_COOKIE_NAME=teachsim_session
+AUTH_SESSION_TTL_HOURS=168
+AUTH_SESSION_COOKIE_SECURE=false
+```
+
+### 邮箱验证码
+
+```dotenv
+SMTP_HOST=smtp.example.com
+SMTP_PORT=465
+SMTP_USERNAME=placeholder
+SMTP_PASSWORD=placeholder
+SMTP_FROM=placeholder
+SMTP_USE_SSL=true
+AUTH_CODE_TTL_MINUTES=10
+AUTH_CODE_RESEND_SECONDS=60
+AUTH_CODE_MAX_ATTEMPTS=5
+AUTH_PASSWORD_MIN_LENGTH=8
+```
+
+### 语音服务
+
+```dotenv
+ASR_PROVIDER=volcengine
+VOLC_ASR_APP_ID=placeholder
+VOLC_ASR_ACCESS_TOKEN=placeholder
+VOLC_ASR_RESOURCE_ID=volc.bigasr.auc_turbo
+VOLC_HTTP_TRUST_ENV=false
+ASR_DEBUG_PERSIST=true
+
+XFYUN_APP_ID=placeholder
+XFYUN_API_KEY=placeholder
+XFYUN_API_SECRET=placeholder
+
+MINIMAX_API_KEY=placeholder
+MINIMAX_T2A_MODEL=speech-2.6-turbo
+MINIMAX_T2A_TIMEOUT_S=45
+```
+
+### AI 模型
+
+```dotenv
+DEEPSEEK_API_KEY=placeholder
+ECNU_API_KEY=placeholder
+SILICONFLOW_API_KEY=placeholder
+MOONSHOT_API_KEY=placeholder
+QWEN_API_KEY=placeholder
+```
+
+实际启用模型以 `ai/setting/llm.py` 为准。
 
 ---
 
-## 数据库迁移
+## 数据库
+
+执行迁移：
 
 ```bash
 cd backend
 alembic upgrade head
 ```
 
-当前两次迁移创建或扩展以下 6 张主要表：
+项目数据表：
 
-- `lessons`
-- `lesson_files`
-- `sessions`
-- `transcripts`
-- `session_turns`
-- `session_segments`
-
-迁移文件中的 `revision` 标识与文件名日期不同，排查迁移链时应以文件内 `revision/down_revision` 为准。
+| 表名 | 用途 |
+|---|---|
+| `users` | 邮箱用户 |
+| `auth_sessions` | 登录会话 |
+| `auth_email_challenges` | 注册和重置验证码 |
+| `teachers` | 教师信息 |
+| `lessons` | 课程和结构化教案 |
+| `lesson_files` | 上传文件 |
+| `sessions` | 课堂会话 |
+| `transcripts` | 音频转写 |
+| `session_turns` | 师生发言 |
+| `session_segments` | 课堂片段和评价 |
+| `session_students` | 虚拟学生类型和动态状态 |
+| `session_visual_observations` | 教姿教态视觉窗口 |
 
 ---
 
-## 本地启动
+## 启动项目
 
-推荐顺序：数据库迁移 → AI 服务 → 业务后端 → 前端。
+推荐启动顺序：数据库 → AI 服务 → 业务后端 → 前端。
 
-### 1. AI 服务（8001）
+### 1. 启动 AI 服务
 
 ```bash
 cd ai
 python main.py
 ```
 
-健康检查：`GET http://localhost:8001/health`
+健康检查：
 
-### 2. 业务后端
+```text
+GET http://localhost:8001/health
+```
 
-若前端显式代理到 8000：
+### 2. 启动业务后端
 
 ```bash
 cd backend
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8010
 ```
 
-若保持前端当前默认代理，则把端口改为 8010。不要使用 `uvicorn main:app`，因为应用入口位于 `backend/app/main.py`。
+- 健康检查：`http://localhost:8010/health`
+- Swagger：`http://localhost:8010/docs`
 
-健康检查：`GET http://localhost:8000/health`（端口按实际配置）
-Swagger：`http://localhost:8000/docs`
-
-### 3. 前端（5173）
+### 3. 启动前端
 
 ```bash
 cd frontend
@@ -151,48 +242,116 @@ npm run dev
 
 ---
 
-## 当前联调边界
+## 系统主流程
 
-业务后端当前已有：课程初始化、课程状态、课堂发言、学生静态状态、课堂片段评价、课后报告、调试 ASR。
+### 1. 用户认证
 
-当前前端还依赖但业务后端缺失：
+前端调用 `/api/auth/*` 完成注册、登录、退出和密码重置。业务后端设置 HttpOnly Cookie，并将用户会话保存到数据库。
 
-- Cookie 登录注册和密码重置；
-- PPT 预览和 PDF 下载；
-- 会话重启；
-- 学生实时回复转发；
-- 历史课堂、最近五次对比、最新预设、能力画像；
-- 讯飞 ASR 签名；
-- MiniMax TTS。
+### 2. 课前配置
 
-在这些路由补齐前，不能把“登录到历史画像的完整主链路”标记为仓库现状。若相关代码位于其他分支，应先合并再更新文档。
+教师上传教案和 PPT，或进入自由模式。前端调用 AI 服务获得结构化课程内容，再通过 `/api/init_lesson` 创建课程和课堂会话。
+
+### 3. 虚拟课堂
+
+1. 前端调用讯飞签名接口并建立实时 ASR。
+2. 完整教师发言发送到 `/api/inclass/utterance`。
+3. 业务后端保存发言并调用 AI Supervisor。
+4. 学生根据问题难度和课堂氛围举手。
+5. 教师点名后调用 `/api/inclass/student-reply`。
+6. 学生回复通过 MiniMax TTS 或浏览器语音播放。
+7. PPT 翻页、时间窗口结束或停止录音时提交课堂片段。
+8. 用户开启视觉功能后，前端按 15 秒窗口上传教姿观察数据。
+
+### 4. 课后报告
+
+报告接口汇总：
+
+- 教案和教学偏好；
+- 师生发言；
+- 课堂片段评价；
+- Supervisor 决策；
+- 虚拟学生互动；
+- 视觉教态结果。
+
+### 5. 历史与能力画像
+
+历史模块提供课堂筛选、报告查看、最近五节比较、配置复用和教师能力画像。
+
+---
+
+## 测试
+
+### 业务后端
+
+```bash
+cd backend
+python -m pytest app/tests
+```
+
+测试覆盖：
+
+- 学生状态初始化；
+- 举手策略；
+- JWT 密钥校验；
+- 数据查询性能回归；
+- 讯飞签名安全。
+
+### 前端
+
+```bash
+cd frontend
+npm run build
+```
+
+### AI 服务
+
+按照 `ai/测试.md` 中的 curl 命令测试：
+
+- 教案解析；
+- PPT 解析；
+- 课堂片段评价；
+- Supervisor 决策；
+- 学生回复；
+- 视觉分析；
+- 课后报告。
 
 ---
 
 ## 接口变更流程
 
-1. 在 `docs/api.md` 提议并确认前端可见合同。
-2. 若涉及 AI，先更新 `ai/docs/ai-backend-contract-v2.md`。
-3. 同步修改业务后端路由/Pydantic 模型、前端 `src/api/` 和调用页面。
-4. 至少完成一次成功请求、一次参数错误和一次下游服务失败测试。
-5. 更新接口状态和代码基线日期。
+1. 在 `docs/api.md` 中确认前端可见合同。
+2. AI 字段同步更新 `ai/docs/ai-backend-contract-v2.md`。
+3. 同步修改业务后端路由、Schema、前端 API 和调用页面。
+4. 完成接口测试。
+5. 更新文档版本和里程碑。
 
-Supervisor 联调尤其要同时核对：
+Supervisor 相关改动同步检查：
 
-- 前端提交到业务后端的字段；
-- 业务后端转发到 AI 的字段；
-- `ai/main.py` 中 `SupervisorV2Request` 实际读取的字段；
-- `ai/docs/ai-backend-contract-v2.md` 的字段说明。
+- `frontend/src/views/ClassroomView.vue`
+- `backend/app/schemas/inclass.py`
+- `backend/app/api/routes/inclass.py`
+- `backend/app/services/ai_client.py`
+- `ai/main.py`
+- `ai/agents/inclass_supervisor_agent.py`
 
-当前已知差异是业务后端发送 `current_timestamp`、`called_student_id`，AI v2 读取 `class_elapsed_sec`、`called_student_status_digest`。
+视觉分析相关改动同步检查：
+
+- `frontend/src/api/visual.js`
+- `frontend/src/views/ClassroomView.vue`
+- `backend/app/api/routes/visual.py`
+- `backend/app/services/reporting.py`
+- `ai/agents/inclass_visual_obs_llm.py`
+- `frontend/src/views/ReportView.vue`
 
 ---
 
-## 提交与里程碑
+## 提交规范
 
-- 后续功能只提交到根目录的 `frontend/`、`backend/`、`ai/`、`docs/`。
-- 不再新增 `testxxxx/` 目录。
-- 里程碑使用 Git tag，例如 `week-0715`、`week-0719`、`week-0719-ai`。
-- 提交前检查 `git status`，不要提交 `.env`、上传文件、构建产物或真实凭据。
+- 功能代码提交到根目录的 `frontend/`、`backend/`、`ai/`。
+- 项目文档提交到 `docs/`。
+- 里程碑使用 Git tag 标记。
+- 提交前检查 `git status`。
+- `.env`、真实密钥、上传文件和构建产物不提交到 Git。
+- 接口变更在提交信息中注明影响模块。
 
----
