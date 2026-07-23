@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
+
+# 课堂展示时间统一按中国时区（与前端 toLocaleString 默认行为一致）
+DISPLAY_TZ = ZoneInfo("Asia/Shanghai")
 
 
 def parse_iso_datetime(value: str) -> datetime:
@@ -9,6 +13,17 @@ def parse_iso_datetime(value: str) -> datetime:
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
     return datetime.fromisoformat(text)
+
+
+def format_display_datetime(
+    dt: datetime | None,
+    fmt: str = "%Y-%m-%d %H:%M",
+) -> str:
+    """将库内 UTC（或带时区）时间格式化为本地展示字符串。"""
+    if dt is None:
+        return ""
+    aware = dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+    return aware.astimezone(DISPLAY_TZ).strftime(fmt)
 
 
 def guess_subject_icon(subject: str) -> str:

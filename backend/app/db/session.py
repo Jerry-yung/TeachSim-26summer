@@ -11,9 +11,12 @@ from app.core.config import get_settings
 
 @lru_cache
 def get_engine() -> Engine:
+    # connect_timeout：避免 Supabase/网络异常时登录接口长时间挂起无响应
     return create_engine(
         get_settings().sqlalchemy_database_uri,
         pool_pre_ping=True,
+        pool_timeout=30,
+        connect_args={"connect_timeout": 15},
     )
 
 

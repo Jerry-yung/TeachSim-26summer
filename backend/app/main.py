@@ -5,7 +5,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.routes import asr_debug, history, inclass, lesson, report
+from app.api.routes import asr, asr_debug, auth, history, inclass, lesson, report, tts, visual
 from app.core.config import get_settings
 from app.services.storage import ensure_upload_root
 
@@ -46,11 +46,15 @@ async def validation_exception_handler(_request, exc: RequestValidationError):
     )
 
 
+app.include_router(auth.router, prefix="/api")
 app.include_router(lesson.router, prefix="/api")
+app.include_router(asr.router, prefix="/api")
 app.include_router(asr_debug.router, prefix="/api/debug")
 app.include_router(inclass.router, prefix="/api")
 app.include_router(report.router, prefix="/api")
 app.include_router(history.router, prefix="/api")
+app.include_router(tts.router, prefix="/api")
+app.include_router(visual.router, prefix="/api")
 
 
 @app.get("/health")

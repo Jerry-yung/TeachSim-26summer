@@ -1,8 +1,8 @@
 """initial_tables
 
 Revision ID: 70a542d2df6b
-Revises: 
-Create Date: 2026-07-17 10:39:58.173064
+Revises:
+Create Date: 2026-07-17
 
 """
 from typing import Sequence, Union
