@@ -1,4 +1,8 @@
 # 开发规范与协作指南
+---
+
+## 辅助工具
+当前的主要的辅助工具是cursor进行代码的编写，问卷星进行问卷的设计
 
 ---
 
@@ -60,6 +64,95 @@ TeachSim-26summer/
 VITE_BACKEND_PROXY_TARGET=http://127.0.0.1:8010
 VITE_AI_PROXY_TARGET=http://127.0.0.1:8001
 ```
+
+---
+
+## 系统架构
+
+TeachSim 采用前端、业务后端和 AI 服务相互协作的三服务架构。前端负责课堂操作与结果展示，业务后端负责认证、业务流程和数据管理，AI 服务负责教学内容理解、课堂决策和智能评价。
+
+```mermaid
+flowchart LR
+    U["教师<br/>浏览器"]
+
+    subgraph FE["前端服务 · Vue 3 / Vite · 5173"]
+        UI["登录、课前配置、虚拟课堂、课后报告、历史与能力画像"]
+        MEDIA["WebSocket、MediaRecorder、Web Audio、PDF.js、ECharts"]
+    end
+
+    subgraph BE["业务后端 · FastAPI · 8010"]
+        AUTH["用户认证与 Cookie 会话"]
+        LESSON["课程、课堂与虚拟学生状态"]
+        CLASS["课堂发言、片段、视觉观察"]
+        REPORT["报告、历史与能力画像"]
+        VOICE["讯飞签名与 MiniMax TTS 代理"]
+    end
+
+    subgraph AI["AI 服务 · FastAPI / LangChain · 8001"]
+        PARSE["教案与 PPT 结构化解析"]
+        SUPERVISOR["课堂 Supervisor 与学生 Agent"]
+        EVAL["课堂片段、视觉教态与课后报告评价"]
+    end
+
+    DB[("PostgreSQL")]
+    FILES[("上传文件与视觉素材")]
+    XFYUN["讯飞实时语音识别"]
+    MINIMAX["MiniMax 语音合成"]
+    MODELS["大语言模型与多模态模型"]
+
+    U --> FE
+    UI -->|"业务请求 /backend-api"| BE
+    UI -->|"课前解析 /ai-api"| AI
+    BE -->|"内部 AI HTTP 调用"| AI
+    BE --> DB
+    BE --> FILES
+    VOICE --> MINIMAX
+    MEDIA -->|"获取后端签名后建立 WebSocket"| XFYUN
+    AI --> MODELS
+```
+
+### 服务职责
+
+| 服务 | 主要职责 | 主要数据 |
+|---|---|---|
+| 前端 | 用户交互、课堂计时、实时语音接入、PPT 展示、摄像头采样、报告图表展示 | 当前课堂状态、问卷答案、PPT 页码、临时音视频数据 |
+| 业务后端 | 用户认证、课程与课堂管理、学生状态维护、业务数据持久化、AI 调用编排、历史与报告查询 | 用户、课程、课堂、发言、片段、学生状态、报告和视觉观察 |
+| AI 服务 | 教案和 PPT 解析、课堂状态判断、学生回复、片段评价、教姿教态分析、课后报告生成 | 结构化教学内容、课堂上下文和智能分析结果 |
+
+### 前端、业务后端与 AI 服务调用关系
+
+前端通过 Vite 代理访问两个后端服务：
+
+- `/backend-api` 转发到业务后端 `http://127.0.0.1:8010`；
+- `/ai-api` 转发到 AI 服务 `http://127.0.0.1:8001`。
+
+主要调用关系如下：
+
+| 调用方 | 被调用方 | 调用内容 | 代表接口 |
+|---|---|---|---|
+| 前端 | AI 服务 | 课前上传文件并获得结构化教案或课件内容 | `/ai/parse_lesson`、`/ai/parse_lessons` |
+| 前端 | 业务后端 | 注册、登录、退出、密码重置和当前用户查询 | `/api/auth/*` |
+| 前端 | 业务后端 | 创建课程与课堂、查询分析状态、获取 PPT 预览 | `/api/init_lesson`、`/api/lesson/{lesson_id}/*` |
+| 前端 | 业务后端 | 保存教师发言、获取学生决策与学生回复 | `/api/inclass/utterance`、`/api/inclass/student-reply` |
+| 前端 | 业务后端 | 提交课堂片段和视觉观察窗口 | `/api/inclass/segment`、`/api/inclass/visual-observation` |
+| 前端 | 业务后端 | 生成报告、查询最近五节比较、历史课堂和能力画像 | `/api/report/*`、`/api/history/*` |
+| 前端 | 业务后端 | 获取讯飞临时签名并请求 MiniMax 学生语音 | `/api/asr/xfyun/sign`、`/api/tts/minimax/synthesize` |
+| 业务后端 | AI 服务 | 教案解析、课堂决策、学生回复、片段评价、视觉分析和报告生成 | `/ai/v2/preclass/*`、`/ai/v2/inclass/*`、`/ai/v2/postclass/*` |
+
+一次完整课堂的数据流如下：
+
+```text
+教师在前端完成课前配置
+  → 前端调用 AI 服务解析教案和 PPT
+  → 前端将结构化结果提交给业务后端
+  → 业务后端创建课程、课堂会话和虚拟学生状态
+  → 前端持续提交教师发言、课堂片段和视觉观察
+  → 业务后端保存数据并调用 AI 服务完成决策与评价
+  → 业务后端汇总课堂数据和 AI 结果生成课后报告
+  → 前端展示报告、历史比较和教师能力画像
+```
+
+业务后端是课堂业务数据的统一入口，负责用户权限和数据归属校验；AI 服务专注于智能分析，不直接管理用户会话和业务数据库。
 
 ---
 
@@ -354,4 +447,3 @@ Supervisor 相关改动同步检查：
 - 提交前检查 `git status`。
 - `.env`、真实密钥、上传文件和构建产物不提交到 Git。
 - 接口变更在提交信息中注明影响模块。
-
